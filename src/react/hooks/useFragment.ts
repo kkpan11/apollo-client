@@ -1,6 +1,4 @@
-import * as React from "react";
-import { equal } from "@wry/equality";
-
+import * as React from "rehackt";
 import type { DeepPartial } from "../../utilities/index.js";
 import { mergeDeepArray } from "../../utilities/index.js";
 import type {
@@ -12,8 +10,11 @@ import type {
 
 import { useApolloClient } from "./useApolloClient.js";
 import { useSyncExternalStore } from "./useSyncExternalStore.js";
-import type { OperationVariables } from "../../core/index.js";
+import type { ApolloClient, OperationVariables } from "../../core/index.js";
 import type { NoInfer } from "../types/types.js";
+import { useDeepMemo, wrapHook } from "./internal/index.js";
+import equal from "@wry/equality";
+import type { FragmentType, MaybeMasked } from "../../masking/index.js";
 
 export interface UseFragmentOptions<TData, TVars>
   extends Omit<
@@ -24,19 +25,28 @@ export interface UseFragmentOptions<TData, TVars>
       Cache.ReadFragmentOptions<TData, TVars>,
       "id" | "variables" | "returnPartialData"
     > {
-  from: StoreObject | Reference | string;
+  from: StoreObject | Reference | FragmentType<NoInfer<TData>> | string | null;
   // Override this field to make it optional (default: true).
   optimistic?: boolean;
+  /**
+   * The instance of `ApolloClient` to use to look up the fragment.
+   *
+   * By default, the instance that's passed down via context is used, but you
+   * can provide a different instance here.
+   *
+   * @docGroup 1. Operation options
+   */
+  client?: ApolloClient<any>;
 }
 
 export type UseFragmentResult<TData> =
   | {
-      data: TData;
+      data: MaybeMasked<TData>;
       complete: true;
       missing?: never;
     }
   | {
-      data: DeepPartial<TData>;
+      data: DeepPartial<MaybeMasked<TData>>;
       complete: false;
       missing?: MissingTree;
     };
@@ -44,48 +54,104 @@ export type UseFragmentResult<TData> =
 export function useFragment<TData = any, TVars = OperationVariables>(
   options: UseFragmentOptions<TData, TVars>
 ): UseFragmentResult<TData> {
-  const { cache } = useApolloClient();
+  return wrapHook(
+    "useFragment",
+    // eslint-disable-next-line react-compiler/react-compiler
+    useFragment_,
+    useApolloClient(options.client)
+  )(options);
+}
 
-  const { fragment, fragmentName, from, optimistic = true, ...rest } = options;
+function useFragment_<TData = any, TVars = OperationVariables>(
+  options: UseFragmentOptions<TData, TVars>
+): UseFragmentResult<TData> {
+  const client = useApolloClient(options.client);
+  const { cache } = client;
+  const { from, ...rest } = options;
 
-  const diffOptions: Cache.DiffOptions<TData, TVars> = {
-    ...rest,
-    returnPartialData: true,
-    id: typeof from === "string" ? from : cache.identify(from),
-    query: cache["getFragmentDoc"](fragment, fragmentName),
-    optimistic,
-  };
+  // We calculate the cache id seperately from `stableOptions` because we don't
+  // want changes to non key fields in the `from` property to affect
+  // `stableOptions` and retrigger our subscription. If the cache identifier
+  // stays the same between renders, we want to reuse the existing subscription.
+  const id = React.useMemo(
+    () =>
+      typeof from === "string" ? from
+      : from === null ? null
+      : cache.identify(from),
+    [cache, from]
+  );
 
-  const resultRef = React.useRef<UseFragmentResult<TData>>();
-  let latestDiff = cache.diff<TData>(diffOptions);
+  const stableOptions = useDeepMemo(() => ({ ...rest, from: id! }), [rest, id]);
+
+  // Since .next is async, we need to make sure that we
+  // get the correct diff on the next render given new diffOptions
+  const diff = React.useMemo(() => {
+    const { fragment, fragmentName, from, optimistic = true } = stableOptions;
+
+    if (from === null) {
+      return {
+        result: diffToResult({
+          result: {} as TData,
+          complete: false,
+        }),
+      };
+    }
+
+    const { cache } = client;
+    const diff = cache.diff<TData>({
+      ...stableOptions,
+      returnPartialData: true,
+      id: from,
+      query: cache["getFragmentDoc"](fragment, fragmentName),
+      optimistic,
+    });
+
+    return {
+      result: diffToResult({
+        ...diff,
+        result: client["queryManager"].maskFragment({
+          fragment,
+          fragmentName,
+          data: diff.result,
+        }),
+      }),
+    };
+  }, [client, stableOptions]);
 
   // Used for both getSnapshot and getServerSnapshot
-  const getSnapshot = () => {
-    const latestDiffToResult = diffToResult(latestDiff);
-    return resultRef.current &&
-      equal(resultRef.current.data, latestDiffToResult.data)
-      ? resultRef.current
-      : (resultRef.current = latestDiffToResult);
-  };
+  const getSnapshot = React.useCallback(() => diff.result, [diff]);
 
   return useSyncExternalStore(
-    (forceUpdate) => {
-      let lastTimeout = 0;
-      const unsubcribe = cache.watch({
-        ...diffOptions,
-        immediate: true,
-        callback(diff) {
-          if (!equal(diff, latestDiff)) {
-            resultRef.current = diffToResult((latestDiff = diff));
-            lastTimeout = setTimeout(forceUpdate) as any;
-          }
-        },
-      });
-      return () => {
-        unsubcribe();
-        clearTimeout(lastTimeout);
-      };
-    },
+    React.useCallback(
+      (forceUpdate) => {
+        let lastTimeout = 0;
+
+        const subscription =
+          stableOptions.from === null ?
+            null
+          : client.watchFragment(stableOptions).subscribe({
+              next: (result) => {
+                // Since `next` is called async by zen-observable, we want to avoid
+                // unnecessarily rerendering this hook for the initial result
+                // emitted from watchFragment which should be equal to
+                // `diff.result`.
+                if (equal(result, diff.result)) return;
+                diff.result = result;
+                // If we get another update before we've re-rendered, bail out of
+                // the update and try again. This ensures that the relative timing
+                // between useQuery and useFragment stays roughly the same as
+                // fixed in https://github.com/apollographql/apollo-client/pull/11083
+                clearTimeout(lastTimeout);
+                lastTimeout = setTimeout(forceUpdate) as any;
+              },
+            });
+        return () => {
+          subscription?.unsubscribe();
+          clearTimeout(lastTimeout);
+        };
+      },
+      [client, stableOptions, diff]
+    ),
     getSnapshot,
     getSnapshot
   );

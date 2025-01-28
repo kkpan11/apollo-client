@@ -12,7 +12,11 @@ import { ApolloProvider } from "../../../context";
 import { InMemoryCache as Cache } from "../../../../cache";
 import { itAsync, mockSingleLink } from "../../../../testing";
 import { graphql } from "../../graphql";
-import { ChildProps } from "../../types";
+import { ChildProps, DataValue } from "../../types";
+import {
+  createRenderStream,
+  disableActEnvironment,
+} from "@testing-library/react-render-stream";
 
 describe("[queries] loading", () => {
   // networkStatus / loading
@@ -321,7 +325,7 @@ describe("[queries] loading", () => {
                 expect(data!.networkStatus).toBe(7);
                 // this isn't reloading fully
                 setTimeout(() => {
-                  data!.refetch();
+                  void data!.refetch();
                 });
                 break;
               case 1:
@@ -388,8 +392,6 @@ describe("[queries] loading", () => {
       queryDeduplication: false,
     });
 
-    let count = 0;
-
     const usedFetchPolicies: WatchQueryFetchPolicy[] = [];
     const Container = graphql<{}, Data>(query, {
       options: {
@@ -408,57 +410,66 @@ describe("[queries] loading", () => {
     })(
       class extends React.Component<ChildProps<{}, Data>> {
         render() {
-          ++count;
-          if (count === 1) {
-            expect(this.props.data!.loading).toBe(true);
-            expect(this.props.data!.allPeople).toBeUndefined();
-          } else if (count === 2) {
-            expect(this.props.data!.loading).toBe(false);
-            expect(this.props.data!.allPeople!.people[0].name).toMatch(
-              /Darth Skywalker - /
-            );
-            // Has data
-            setTimeout(() => render(App));
-          } else if (count === 3) {
-            // Loading after remount
-            expect(this.props.data!.loading).toBe(true);
-            expect(this.props.data!.allPeople).toBeUndefined();
-          } else if (count >= 4) {
-            // Fetched data loading after remount
-            expect(this.props.data!.loading).toBe(false);
-            expect(this.props.data!.allPeople!.people[0].name).toMatch(
-              /Darth Skywalker - /
-            );
-          }
+          replaceSnapshot(this.props.data!);
           return null;
         }
       }
     );
 
-    const App: React.ReactElement<any> = (
-      <ApolloProvider client={client}>
-        <Container />
-      </ApolloProvider>
+    const wrapper = ({ children }: { children: React.ReactNode }) => (
+      <ApolloProvider client={client}>{children}</ApolloProvider>
     );
 
-    render(App);
+    using _disabledAct = disableActEnvironment();
+    const { takeRender, replaceSnapshot, render } = createRenderStream<
+      DataValue<{
+        allPeople: {
+          people: {
+            name: string;
+          }[];
+        };
+      }>
+    >();
 
-    await waitFor(
-      () => {
-        expect(usedFetchPolicies).toEqual([
-          "network-only",
-          "network-only",
-          "cache-first",
-        ]);
-      },
-      { interval: 1 }
-    );
-    await waitFor(
-      () => {
-        expect(count).toBe(5);
-      },
-      { interval: 1 }
-    );
+    await render(<Container />, {
+      wrapper,
+    });
+
+    {
+      const { snapshot } = await takeRender();
+      expect(snapshot.loading).toBe(true);
+      expect(snapshot.allPeople).toBeUndefined();
+    }
+    {
+      const { snapshot } = await takeRender();
+      expect(snapshot.loading).toBe(false);
+      expect(snapshot.allPeople?.people[0].name).toMatch(/Darth Skywalker - /);
+    }
+    await render(<Container />, {
+      wrapper,
+    });
+    // Loading after remount
+    {
+      const { snapshot } = await takeRender();
+      expect(snapshot.loading).toBe(true);
+      expect(snapshot.allPeople).toBeUndefined();
+    }
+    {
+      const { snapshot } = await takeRender();
+      // Fetched data loading after remount
+      expect(snapshot.loading).toBe(false);
+      expect(snapshot.allPeople!.people[0].name).toMatch(/Darth Skywalker - /);
+    }
+
+    await expect(takeRender).toRenderExactlyTimes(5, {
+      timeout: 100,
+    });
+
+    expect(usedFetchPolicies).toEqual([
+      "network-only",
+      "network-only",
+      "cache-first",
+    ]);
   });
 
   itAsync(

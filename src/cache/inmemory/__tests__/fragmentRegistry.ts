@@ -1,7 +1,7 @@
 import { ApolloClient, ApolloLink, gql, NetworkStatus } from "../../../core";
 import { getFragmentDefinitions, Observable } from "../../../utilities";
 import { InMemoryCache, createFragmentRegistry } from "../../index";
-import { itAsync, subscribeAndCount } from "../../../testing";
+import { ObservableStream } from "../../../testing/internal";
 
 describe("FragmentRegistry", () => {
   it("can be passed to InMemoryCache", () => {
@@ -38,7 +38,7 @@ describe("FragmentRegistry", () => {
     });
   });
 
-  itAsync("influences ApolloClient and ApolloLink", (resolve, reject) => {
+  it("influences ApolloClient and ApolloLink", async () => {
     const cache = new InMemoryCache({
       fragments: createFragmentRegistry(gql`
         fragment SourceFragment on Query {
@@ -49,23 +49,28 @@ describe("FragmentRegistry", () => {
 
     const client = new ApolloClient({
       cache,
-      link: new ApolloLink(operation => new Observable(observer => {
-        expect(
-          getFragmentDefinitions(operation.query).map(def => def.name.value).sort()
-        ).toEqual([
-          // Proof that the missing SourceFragment definition was appended to
-          // operation.query before it was passed into the link.
-          "SourceFragment",
-        ]);
+      link: new ApolloLink(
+        (operation) =>
+          new Observable((observer) => {
+            expect(
+              getFragmentDefinitions(operation.query)
+                .map((def) => def.name.value)
+                .sort()
+            ).toEqual([
+              // Proof that the missing SourceFragment definition was appended to
+              // operation.query before it was passed into the link.
+              "SourceFragment",
+            ]);
 
-        observer.next({
-          data: {
-            source: "link",
-          },
-        });
+            observer.next({
+              data: {
+                source: "link",
+              },
+            });
 
-        observer.complete();
-      })),
+            observer.complete();
+          })
+      ),
     });
 
     const query = gql`
@@ -81,38 +86,30 @@ describe("FragmentRegistry", () => {
       },
     });
 
-    subscribeAndCount(reject, client.watchQuery({
-      query,
-      fetchPolicy: "cache-and-network",
-    }), (count, result) => {
-      if (count === 1) {
-        expect(result).toEqual({
-          loading: true,
-          networkStatus: NetworkStatus.loading,
-          data: {
-            __typename: 'Query',
-            source: "local",
-          },
-        });
+    const stream = new ObservableStream(
+      client.watchQuery({ query, fetchPolicy: "cache-and-network" })
+    );
 
-      } else if (count === 2) {
-        expect(result).toEqual({
-          loading: false,
-          networkStatus: NetworkStatus.ready,
-          data: {
-            __typename: 'Query',
-            source: "link",
-          },
-        });
+    await expect(stream).toEmitValue({
+      loading: true,
+      networkStatus: NetworkStatus.loading,
+      data: {
+        __typename: "Query",
+        source: "local",
+      },
+    });
 
-        expect(cache.readQuery({ query })).toEqual({
-          source: "link",
-        });
+    await expect(stream).toEmitValue({
+      loading: false,
+      networkStatus: NetworkStatus.ready,
+      data: {
+        __typename: "Query",
+        source: "link",
+      },
+    });
 
-        setTimeout(resolve, 10);
-      } else {
-        reject(`Unexpectedly many results (${count})`);
-      }
+    expect(cache.readQuery({ query })).toEqual({
+      source: "link",
     });
   });
 
@@ -158,9 +155,7 @@ describe("FragmentRegistry", () => {
           },
         },
       });
-    }).toThrow(
-      /No fragment named MustBeDefinedByQuery/
-    );
+    }).toThrow(/No fragment named MustBeDefinedByQuery/);
 
     expect(cache.extract()).toEqual({
       // Nothing written because the cache.writeQuery failed above.
@@ -195,22 +190,18 @@ describe("FragmentRegistry", () => {
         returnPartialData: true,
         optimistic: true,
       });
-    }).toThrow(
-      /No fragment named MustBeDefinedByQuery/
-    );
+    }).toThrow(/No fragment named MustBeDefinedByQuery/);
 
     expect(() => {
       cache.readQuery({
-        query: queryWithoutFragment
+        query: queryWithoutFragment,
       });
-    }).toThrow(
-      /No fragment named MustBeDefinedByQuery/
-    );
+    }).toThrow(/No fragment named MustBeDefinedByQuery/);
 
     expect(
       cache.readQuery({
         query: queryWithFragment,
-      }),
+      })
     ).toEqual({
       me: {
         __typename: "Person",

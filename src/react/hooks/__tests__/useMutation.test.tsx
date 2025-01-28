@@ -1,13 +1,14 @@
 import React, { useEffect } from "react";
 import { GraphQLError } from "graphql";
 import gql from "graphql-tag";
-import { act } from "react-dom/test-utils";
+import { act } from "@testing-library/react";
 import { render, waitFor, screen, renderHook } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import fetchMock from "fetch-mock";
 
 import {
   ApolloClient,
+  ApolloError,
   ApolloLink,
   ApolloQueryResult,
   Cache,
@@ -18,17 +19,27 @@ import {
 } from "../../../core";
 import { InMemoryCache } from "../../../cache";
 import {
-  itAsync,
   MockedProvider,
   MockSubscriptionLink,
   mockSingleLink,
-  subscribeAndCount,
+  MockedResponse,
+  MockLink,
 } from "../../../testing";
 import { ApolloProvider } from "../../context";
 import { useQuery } from "../useQuery";
 import { useMutation } from "../useMutation";
 import { BatchHttpLink } from "../../../link/batch-http";
 import { FetchResult } from "../../../link/core";
+import { spyOnConsole } from "../../../testing/internal";
+import { expectTypeOf } from "expect-type";
+import { Masked } from "../../../masking";
+import {
+  disableActEnvironment,
+  createRenderStream,
+  renderHookToSnapshotStream,
+} from "@testing-library/react-render-stream";
+import { MutationTuple, QueryResult } from "../../types/types";
+import { invariant } from "../../../utilities/globals";
 
 describe("useMutation Hook", () => {
   interface Todo {
@@ -115,7 +126,7 @@ describe("useMutation Hook", () => {
         const [createTodo, { loading, data }] =
           useMutation(CREATE_TODO_MUTATION);
         useEffect(() => {
-          createTodo({ variables });
+          void createTodo({ variables });
         }, [variables]);
 
         return { loading, data };
@@ -227,7 +238,7 @@ describe("useMutation Hook", () => {
     });
 
     it("should not call setResult on an unmounted component", async () => {
-      const errorSpy = jest.spyOn(console, "error");
+      using consoleSpies = spyOnConsole("error");
       const variables = {
         description: "Get milk!",
       };
@@ -260,8 +271,7 @@ describe("useMutation Hook", () => {
         await result.current.reset();
       });
 
-      expect(errorSpy).not.toHaveBeenCalled();
-      errorSpy.mockRestore();
+      expect(consoleSpies.error).not.toHaveBeenCalled();
     });
 
     it("should resolve mutate function promise with mutation results", async () => {
@@ -345,7 +355,7 @@ describe("useMutation Hook", () => {
               variables,
             },
             result: {
-              errors: [new GraphQLError(CREATE_TODO_ERROR)],
+              errors: [{ message: CREATE_TODO_ERROR }],
             },
           },
         ];
@@ -370,7 +380,9 @@ describe("useMutation Hook", () => {
           throw new Error("function did not error");
         });
 
-        expect(fetchError).toEqual(new GraphQLError(CREATE_TODO_ERROR));
+        expect(fetchError).toEqual(
+          new ApolloError({ graphQLErrors: [{ message: CREATE_TODO_ERROR }] })
+        );
       });
 
       it(`should reject when errorPolicy is 'none'`, async () => {
@@ -496,9 +508,7 @@ describe("useMutation Hook", () => {
       });
 
       it(`should ignore errors when errorPolicy is 'ignore'`, async () => {
-        const errorMock = jest
-          .spyOn(console, "error")
-          .mockImplementation(() => {});
+        using consoleSpy = spyOnConsole("error");
         const variables = {
           description: "Get milk!",
         };
@@ -531,9 +541,8 @@ describe("useMutation Hook", () => {
         });
 
         expect(fetchResult).toEqual({});
-        expect(errorMock).toHaveBeenCalledTimes(1);
-        expect(errorMock.mock.calls[0][0]).toMatch("Missing field");
-        errorMock.mockRestore();
+        expect(consoleSpy.error).toHaveBeenCalledTimes(1);
+        expect(consoleSpy.error.mock.calls[0][0]).toMatch("Missing field");
       });
 
       it(`should not call onError when errorPolicy is 'ignore'`, async () => {
@@ -722,6 +731,86 @@ describe("useMutation Hook", () => {
         { interval: 1 }
       );
     });
+
+    it("resetting while a mutation is running: ensure that the result doesn't end up in the hook", async () => {
+      const CREATE_TODO_DATA = {
+        createTodo: {
+          id: 1,
+          priority: "Low",
+          description: "Get milk!",
+          __typename: "Todo",
+        },
+      };
+
+      const mocks: MockedResponse[] = [
+        {
+          request: {
+            query: CREATE_TODO_MUTATION,
+            variables: {
+              priority: "Low",
+              description: "Get milk.",
+            },
+          },
+          result: {
+            data: CREATE_TODO_DATA,
+          },
+          delay: 20,
+        },
+      ];
+
+      using _disabledAct = disableActEnvironment();
+      const { takeSnapshot } = await renderHookToSnapshotStream(
+        () =>
+          useMutation<
+            { createTodo: Todo },
+            { priority: string; description: string }
+          >(CREATE_TODO_MUTATION),
+        {
+          wrapper: ({ children }) => (
+            <MockedProvider mocks={mocks}>{children}</MockedProvider>
+          ),
+        }
+      );
+
+      let createTodo: Awaited<ReturnType<typeof takeSnapshot>>[0];
+      let reset: Awaited<ReturnType<typeof takeSnapshot>>[1]["reset"];
+
+      {
+        const [mutate, result] = await takeSnapshot();
+        createTodo = mutate;
+        reset = result.reset;
+        //initial value
+        expect(result.data).toBe(undefined);
+        expect(result.loading).toBe(false);
+        expect(result.called).toBe(false);
+      }
+
+      let fetchResult = createTodo({
+        variables: { priority: "Low", description: "Get milk." },
+      });
+
+      {
+        const [, result] = await takeSnapshot();
+        // started loading
+        expect(result.data).toBe(undefined);
+        expect(result.loading).toBe(true);
+        expect(result.called).toBe(true);
+      }
+
+      reset();
+
+      {
+        const [, result] = await takeSnapshot();
+        // reset to initial value
+        expect(result.data).toBe(undefined);
+        expect(result.loading).toBe(false);
+        expect(result.called).toBe(false);
+      }
+
+      expect(await fetchResult).toEqual({ data: CREATE_TODO_DATA });
+
+      await expect(takeSnapshot).not.toRerender();
+    });
   });
 
   describe("Callbacks", () => {
@@ -879,14 +968,13 @@ describe("useMutation Hook", () => {
 
       expect(fetchResult).toEqual({
         data: undefined,
-        // Not sure why we unwrap errors here.
-        errors: errors[0],
+        errors: new ApolloError({ graphQLErrors: errors }),
       });
 
       expect(onCompleted).toHaveBeenCalledTimes(0);
       expect(onError).toHaveBeenCalledTimes(1);
       expect(onError).toHaveBeenCalledWith(
-        errors[0],
+        new ApolloError({ graphQLErrors: errors }),
         expect.objectContaining({ variables })
       );
     });
@@ -930,7 +1018,7 @@ describe("useMutation Hook", () => {
     });
 
     it("should allow updating onError while mutation is executing", async () => {
-      const errors = [new GraphQLError(CREATE_TODO_ERROR)];
+      const errors = [{ message: CREATE_TODO_ERROR }];
       const variables = {
         priority: "Low",
         description: "Get milk.",
@@ -978,15 +1066,14 @@ describe("useMutation Hook", () => {
 
       expect(fetchResult).toEqual({
         data: undefined,
-        // Not sure why we unwrap errors here.
-        errors: errors[0],
+        errors: new ApolloError({ graphQLErrors: errors }),
       });
 
       expect(onCompleted).toHaveBeenCalledTimes(0);
       expect(onError).toHaveBeenCalledTimes(0);
       expect(onError1).toHaveBeenCalledTimes(1);
       expect(onError1).toHaveBeenCalledWith(
-        errors[0],
+        new ApolloError({ graphQLErrors: errors }),
         expect.objectContaining({ variables })
       );
     });
@@ -1397,7 +1484,7 @@ describe("useMutation Hook", () => {
         });
 
         useEffect(() => {
-          createTodo({ variables });
+          void createTodo({ variables });
         }, []);
 
         return null;
@@ -1412,7 +1499,7 @@ describe("useMutation Hook", () => {
       await waitFor(() => expect(variablesMatched).toBe(true));
     });
 
-    itAsync("should be called with the provided context", (resolve, reject) => {
+    it("should be called with the provided context", async () => {
       const context = { id: 3 };
 
       const variables = {
@@ -1444,7 +1531,7 @@ describe("useMutation Hook", () => {
         });
 
         useEffect(() => {
-          createTodo({ variables });
+          void createTodo({ variables });
         }, []);
 
         return null;
@@ -1456,13 +1543,13 @@ describe("useMutation Hook", () => {
         </MockedProvider>
       );
 
-      return waitFor(() => {
+      await waitFor(() => {
         expect(foundContext).toBe(true);
-      }).then(resolve, reject);
+      });
     });
 
     describe("If context is not provided", () => {
-      itAsync("should be undefined", (resolve, reject) => {
+      it("should be undefined", async () => {
         const variables = {
           description: "Get milk!",
         };
@@ -1487,7 +1574,7 @@ describe("useMutation Hook", () => {
           });
 
           useEffect(() => {
-            createTodo({ variables });
+            void createTodo({ variables });
           }, []);
 
           return null;
@@ -1499,92 +1586,89 @@ describe("useMutation Hook", () => {
           </MockedProvider>
         );
 
-        return waitFor(() => {
+        await waitFor(() => {
           expect(checkedContext).toBe(true);
-        }).then(resolve, reject);
+        });
       });
     });
   });
 
   describe("Optimistic response", () => {
-    itAsync(
-      "should support optimistic response handling",
-      async (resolve, reject) => {
-        const optimisticResponse = {
-          __typename: "Mutation",
-          createTodo: {
-            id: 1,
-            description: "TEMPORARY",
-            priority: "High",
-            __typename: "Todo",
+    it("should support optimistic response handling", async () => {
+      const optimisticResponse = {
+        __typename: "Mutation",
+        createTodo: {
+          id: 1,
+          description: "TEMPORARY",
+          priority: "High",
+          __typename: "Todo",
+        },
+      };
+
+      const variables = {
+        description: "Get milk!",
+      };
+
+      const mocks = [
+        {
+          request: {
+            query: CREATE_TODO_MUTATION,
+            variables,
           },
-        };
+          result: { data: CREATE_TODO_RESULT },
+        },
+      ];
 
-        const variables = {
-          description: "Get milk!",
-        };
+      const link = mockSingleLink(...mocks);
+      const cache = new InMemoryCache();
+      const client = new ApolloClient({
+        cache,
+        link,
+      });
 
-        const mocks = [
-          {
-            request: {
-              query: CREATE_TODO_MUTATION,
-              variables,
-            },
-            result: { data: CREATE_TODO_RESULT },
-          },
-        ];
-
-        const link = mockSingleLink(...mocks).setOnError(reject);
-        const cache = new InMemoryCache();
-        const client = new ApolloClient({
-          cache,
-          link,
-        });
-
-        let renderCount = 0;
-        const Component = () => {
-          const [createTodo, { loading, data }] = useMutation(
-            CREATE_TODO_MUTATION,
-            { optimisticResponse }
-          );
-
-          switch (renderCount) {
-            case 0:
-              expect(loading).toBeFalsy();
-              expect(data).toBeUndefined();
-              createTodo({ variables });
-
-              const dataInStore = client.cache.extract(true);
-              expect(dataInStore["Todo:1"]).toEqual(
-                optimisticResponse.createTodo
-              );
-
-              break;
-            case 1:
-              expect(loading).toBeTruthy();
-              expect(data).toBeUndefined();
-              break;
-            case 2:
-              expect(loading).toBeFalsy();
-              expect(data).toEqual(CREATE_TODO_RESULT);
-              break;
-            default:
-          }
-          renderCount += 1;
-          return null;
-        };
-
-        render(
-          <ApolloProvider client={client}>
-            <Component />
-          </ApolloProvider>
+      let renderCount = 0;
+      const Component = () => {
+        const [createTodo, { loading, data }] = useMutation(
+          CREATE_TODO_MUTATION,
+          { optimisticResponse }
         );
 
-        return waitFor(() => {
-          expect(renderCount).toBe(3);
-        }).then(resolve, reject);
-      }
-    );
+        switch (renderCount) {
+          case 0:
+            expect(loading).toBeFalsy();
+            expect(data).toBeUndefined();
+            void createTodo({ variables });
+
+            const dataInStore = client.cache.extract(true);
+            expect(dataInStore["Todo:1"]).toEqual(
+              optimisticResponse.createTodo
+            );
+
+            break;
+          case 1:
+            expect(loading).toBeTruthy();
+            expect(data).toBeUndefined();
+            break;
+          case 2:
+            expect(loading).toBeFalsy();
+            expect(data).toEqual(CREATE_TODO_RESULT);
+            break;
+          default:
+        }
+        renderCount += 1;
+        return null;
+      };
+
+      render(
+        <ApolloProvider client={client}>
+          <Component />
+        </ApolloProvider>
+      );
+
+      await waitFor(() => {
+        expect(renderCount).toBe(3);
+      });
+    });
 
     it("should be called with the provided context", async () => {
       const optimisticResponse = {
@@ -1625,7 +1709,7 @@ describe("useMutation Hook", () => {
         });
 
         useEffect(() => {
-          createTodo({ variables });
+          void createTodo({ variables });
         }, []);
 
         return null;
@@ -1803,7 +1887,7 @@ describe("useMutation Hook", () => {
       expect(result.current.mutation[1].data).toBe(undefined);
       const createTodo = result.current.mutation[0];
       act(() => {
-        createTodo({
+        void createTodo({
           variables,
           async onQueryUpdated(obsQuery, diff) {
             const result = await obsQuery.reobserve();
@@ -1899,8 +1983,8 @@ describe("useMutation Hook", () => {
 
       expect(result.current.query.data).toEqual(mocks[0].result.data);
       const mutate = result.current.mutation[0];
-      act(() => {
-        mutate({
+      await act(async () => {
+        await mutate({
           variables,
           refetchQueries: ["getTodos"],
         });
@@ -2064,24 +2148,21 @@ describe("useMutation Hook", () => {
         (resolve) => (onMutationDone = resolve)
       );
 
-      setTimeout(() => {
-        act(() => {
-          mutate({
-            variables,
-            refetchQueries: ["getTodos"],
-            update() {
-              unmount();
-            },
-          }).then((result) => {
-            expect(result.data).toEqual(CREATE_TODO_RESULT);
-            onMutationDone();
-          });
-        });
-      });
-
       expect(result.current.query.loading).toBe(false);
       expect(result.current.query.data).toEqual(mocks[0].result.data);
 
+      await act(async () => {
+        await mutate({
+          variables,
+          refetchQueries: ["getTodos"],
+          update() {
+            unmount();
+          },
+        }).then((result) => {
+          expect(result.data).toEqual(CREATE_TODO_RESULT);
+          onMutationDone();
+        });
+      });
       await mutatePromise;
 
       await waitFor(() => {
@@ -2091,316 +2172,405 @@ describe("useMutation Hook", () => {
       });
     });
 
-    itAsync(
-      "using onQueryUpdated callback should not prevent cache broadcast",
-      async (resolve, reject) => {
-        // Mutating this array makes the tests below much more difficult to reason
-        // about, so instead we reassign the numbersArray variable to remove
-        // elements, without mutating the previous array object.
-        let numbersArray: ReadonlyArray<{ id: string; value: number }> = [
-          { id: "1", value: 324 },
-          { id: "2", value: 729 },
-          { id: "3", value: 987 },
-          { id: "4", value: 344 },
-          { id: "5", value: 72 },
-          { id: "6", value: 899 },
-          { id: "7", value: 222 },
-        ];
+    it("using onQueryUpdated callback should not prevent cache broadcast", async () => {
+      // Mutating this array makes the tests below much more difficult to reason
+      // about, so instead we reassign the numbersArray variable to remove
+      // elements, without mutating the previous array object.
+      let numbersArray: ReadonlyArray<{ id: string; value: number }> = [
+        { id: "1", value: 324 },
+        { id: "2", value: 729 },
+        { id: "3", value: 987 },
+        { id: "4", value: 344 },
+        { id: "5", value: 72 },
+        { id: "6", value: 899 },
+        { id: "7", value: 222 },
+      ];
 
-        type TNumbersQuery = {
-          numbers: {
-            __typename: "NumbersResult";
+      // Modifying this value means we can return a subset of our numbers array
+      // without needing to mutate or reassignn the original numbersArray.
+      let totalNumbers: number = numbersArray.length;
+
+      type TNumbersQuery = {
+        numbers: {
+          __typename: "NumbersResult";
+          id: string;
+          sum: number;
+          numbersArray: ReadonlyArray<{
             id: string;
-            sum: number;
-            numbersArray: ReadonlyArray<{
-              id: string;
-              value: number;
-            }>;
-          };
+            value: number;
+          }>;
         };
+      };
 
-        function getNumbersData(): TNumbersQuery {
-          return {
-            numbers: {
-              __typename: "NumbersResult",
-              id: "numbersId",
-              numbersArray,
-              sum: numbersArray.reduce((sum, b) => sum + b.value, 0),
-            },
-          };
-        }
+      function getNumbersData(length: number = totalNumbers): TNumbersQuery {
+        const numbers = numbersArray.slice(0, length);
 
-        const link = new ApolloLink((operation) => {
-          return new Observable((observer) => {
+        return {
+          numbers: {
+            __typename: "NumbersResult",
+            id: "numbersId",
+            numbersArray: numbers,
+            sum: numbers.reduce((sum, b) => sum + b.value, 0),
+          },
+        };
+      }
+
+      const link = new ApolloLink((operation) => {
+        return new Observable((observer) => {
+          setTimeout(() => {
             const { operationName } = operation;
             if (operationName === "NumbersQuery") {
               observer.next({
                 data: getNumbersData(),
               });
             } else if (operationName === "RemoveNumberMutation") {
-              const last = numbersArray[numbersArray.length - 1];
-              numbersArray = numbersArray.slice(0, -1);
               observer.next({
                 data: {
-                  removeLastNumber: last,
+                  removeLastNumber: getLastNumber(),
                 },
               });
-            }
-            setTimeout(() => {
-              observer.complete();
-            }, 50);
-          });
-        });
 
-        const client = new ApolloClient({
-          link,
-          cache: new InMemoryCache({
-            typePolicies: {
-              NumbersResult: {
-                fields: {
-                  numbersArray: { merge: false },
-                  sum(_, { readField }) {
-                    const numbersArray =
-                      readField<TNumbersQuery["numbers"]["numbersArray"]>(
-                        "numbersArray"
-                      );
-                    return (numbersArray || []).reduce(
-                      (sum, item) => sum + item.value,
-                      0
+              totalNumbers--;
+            }
+            observer.complete();
+          }, 50);
+        });
+      });
+
+      const client = new ApolloClient({
+        link,
+        cache: new InMemoryCache({
+          typePolicies: {
+            NumbersResult: {
+              fields: {
+                numbersArray: { merge: false },
+                sum(_, { readField }) {
+                  const numbersArray =
+                    readField<TNumbersQuery["numbers"]["numbersArray"]>(
+                      "numbersArray"
                     );
-                  },
+                  return (numbersArray || []).reduce(
+                    (sum, item) => sum + item.value,
+                    0
+                  );
                 },
               },
             },
-          }),
-        });
-
-        const NumbersQuery: TypedDocumentNode<TNumbersQuery> = gql`
-          query NumbersQuery {
-            numbers {
-              id
-              sum
-              numbersArray {
-                id
-                value
-              }
-            }
-          }
-        `;
-
-        const RemoveNumberMutation = gql`
-          mutation RemoveNumberMutation {
-            removeLastNumber {
-              id
-            }
-          }
-        `;
-
-        const { result } = renderHook(
-          () => ({
-            query: useQuery(NumbersQuery, {
-              notifyOnNetworkStatusChange: true,
-            }),
-
-            mutation: useMutation(RemoveNumberMutation, {
-              update(cache) {
-                const oldData = cache.readQuery({ query: NumbersQuery });
-                cache.writeQuery({
-                  query: NumbersQuery,
-                  data: oldData
-                    ? {
-                        ...oldData,
-                        numbers: {
-                          ...oldData.numbers,
-                          numbersArray: oldData.numbers.numbersArray.slice(
-                            0,
-                            -1
-                          ),
-                        },
-                      }
-                    : {
-                        numbers: {
-                          __typename: "NumbersResult",
-                          id: "numbersId",
-                          sum: 0,
-                          numbersArray: [],
-                        },
-                      },
-                });
-              },
-            }),
-          }),
-          {
-            wrapper: ({ children }) => (
-              <ApolloProvider client={client}>{children}</ApolloProvider>
-            ),
-          }
-        );
-
-        const obsQueryMap = client.getObservableQueries();
-        expect(obsQueryMap.size).toBe(1);
-        const observedResults: Array<{ data: TNumbersQuery }> = [];
-        subscribeAndCount(
-          reject,
-          obsQueryMap.values().next().value,
-          (count, result: { data: TNumbersQuery }) => {
-            observedResults.push(result);
-            expect(observedResults.length).toBe(count);
-            const data = getNumbersData();
-
-            if (count === 1) {
-              expect(result).toEqual({
-                loading: true,
-                networkStatus: NetworkStatus.loading,
-                partial: true,
-              });
-            } else if (count === 2) {
-              expect(data.numbers.numbersArray.length).toBe(7);
-              expect(result).toEqual({
-                loading: false,
-                networkStatus: NetworkStatus.ready,
-                data,
-              });
-            } else if (count === 3) {
-              expect(data.numbers.numbersArray.length).toBe(6);
-              expect(result).toEqual({
-                loading: false,
-                networkStatus: NetworkStatus.ready,
-                data,
-              });
-            } else if (count === 4) {
-              expect(data.numbers.numbersArray.length).toBe(5);
-              expect(result).toEqual({
-                loading: false,
-                networkStatus: NetworkStatus.ready,
-                data,
-              });
-
-              // This line is the only way to finish this test successfully.
-              setTimeout(resolve, 50);
-            } else {
-              // If we did not return false from the final onQueryUpdated function,
-              // we would receive an additional result here.
-              reject(
-                `too many renders (${count}); final result: ${JSON.stringify(
-                  result
-                )}`
-              );
-            }
-          }
-        );
-
-        expect(observedResults).toEqual([]);
-
-        expect(result.current.query.loading).toBe(true);
-        expect(result.current.query.networkStatus).toBe(NetworkStatus.loading);
-        expect(result.current.mutation[1].loading).toBe(false);
-        expect(result.current.mutation[1].called).toBe(false);
-        await waitFor(
-          () => {
-            expect(result.current.query.loading).toBe(false);
           },
-          { interval: 1 }
-        );
+        }),
+      });
 
-        expect(result.current.query.networkStatus).toBe(NetworkStatus.ready);
-        expect(result.current.mutation[1].loading).toBe(false);
-        expect(result.current.mutation[1].called).toBe(false);
+      const NumbersQuery: TypedDocumentNode<TNumbersQuery> = gql`
+        query NumbersQuery {
+          numbers {
+            id
+            sum
+            numbersArray {
+              id
+              value
+            }
+          }
+        }
+      `;
 
-        expect(numbersArray[numbersArray.length - 1]).toEqual({
-          id: "7",
-          value: 222,
-        });
+      const RemoveNumberMutation = gql`
+        mutation RemoveNumberMutation {
+          removeLastNumber {
+            id
+          }
+        }
+      `;
 
-        const [mutate] = result.current.mutation;
-        await act(async () => {
-          expect(
-            await mutate()
-            // Not passing an onQueryUpdated callback should allow cache
-            // broadcasts to propagate as normal. The point of this test is to
-            // demonstrate that *adding* onQueryUpdated should not prevent cache
-            // broadcasts (see below for where we test that).
-          ).toEqual({
-            data: {
-              removeLastNumber: {
-                id: "7",
-              },
+      const renderStream = createRenderStream({
+        initialSnapshot: {
+          useQueryResult: null as QueryResult<TNumbersQuery> | null,
+          useMutationResult: null as MutationTuple<any, any> | null,
+        },
+      });
+
+      function App() {
+        renderStream.mergeSnapshot({
+          useQueryResult: useQuery(NumbersQuery, {
+            notifyOnNetworkStatusChange: true,
+          }),
+          useMutationResult: useMutation(RemoveNumberMutation, {
+            update(cache) {
+              const oldData = cache.readQuery({ query: NumbersQuery });
+              cache.writeQuery({
+                query: NumbersQuery,
+                data:
+                  oldData ?
+                    {
+                      ...oldData,
+                      numbers: {
+                        ...oldData.numbers,
+                        numbersArray: oldData.numbers.numbersArray.slice(0, -1),
+                      },
+                    }
+                  : {
+                      numbers: {
+                        __typename: "NumbersResult",
+                        id: "numbersId",
+                        sum: 0,
+                        numbersArray: [],
+                      },
+                    },
+              });
             },
-          });
+          }),
         });
 
-        expect(numbersArray[numbersArray.length - 1]).toEqual({
-          id: "6",
-          value: 899,
-        });
-
-        expect(result.current.query.loading).toBe(false);
-        expect(result.current.query.networkStatus).toBe(NetworkStatus.ready);
-        expect(result.current.mutation[1].loading).toBe(false);
-        expect(result.current.mutation[1].called).toBe(true);
-
-        await act(async () => {
-          expect(
-            await mutate({
-              // Adding this onQueryUpdated callback, which merely examines the
-              // updated query and its DiffResult, should not change the broadcast
-              // behavior of the ObservableQuery.
-              onQueryUpdated(oq, diff) {
-                expect(oq.queryName).toBe("NumbersQuery");
-                expect(diff.result.numbers.numbersArray.length).toBe(5);
-                expect(diff.result.numbers.sum).toBe(2456);
-              },
-            })
-          ).toEqual({
-            data: {
-              removeLastNumber: {
-                id: "6",
-              },
-            },
-          });
-        });
-
-        expect(numbersArray[numbersArray.length - 1]).toEqual({
-          id: "5",
-          value: 72,
-        });
-
-        expect(result.current.query.loading).toBe(false);
-        expect(result.current.query.networkStatus).toBe(NetworkStatus.ready);
-        expect(result.current.mutation[1].loading).toBe(false);
-        expect(result.current.mutation[1].called).toBe(true);
-
-        await act(async () => {
-          expect(
-            await mutate({
-              onQueryUpdated(oq, diff) {
-                expect(oq.queryName).toBe("NumbersQuery");
-                expect(diff.result.numbers.numbersArray.length).toBe(4);
-                expect(diff.result.numbers.sum).toBe(2384);
-                // Returning false from onQueryUpdated prevents the cache broadcast.
-                return false;
-              },
-            })
-          ).toEqual({
-            data: {
-              removeLastNumber: {
-                id: "5",
-              },
-            },
-          });
-        });
-
-        expect(numbersArray[numbersArray.length - 1]).toEqual({
-          id: "4",
-          value: 344,
-        });
-
-        expect(result.current.query.loading).toBe(false);
-        expect(result.current.query.networkStatus).toBe(NetworkStatus.ready);
-        expect(result.current.mutation[1].loading).toBe(false);
-        expect(result.current.mutation[1].called).toBe(true);
+        return null;
       }
-    );
+
+      using _disabledAct = disableActEnvironment();
+      await renderStream.render(<App />, {
+        wrapper: ({ children }) => (
+          <ApolloProvider client={client}>{children}</ApolloProvider>
+        ),
+      });
+
+      async function getNextSnapshot() {
+        const { snapshot } = await renderStream.takeRender();
+
+        invariant(snapshot.useQueryResult);
+        invariant(snapshot.useMutationResult);
+
+        return {
+          useQueryResult: snapshot.useQueryResult,
+          useMutationResult: snapshot.useMutationResult,
+        };
+      }
+
+      function getLastNumber() {
+        const numbers = numbersArray.slice(0, totalNumbers);
+
+        return numbers[numbers.length - 1];
+      }
+
+      expect(getLastNumber()).toEqual({ id: "7", value: 222 });
+
+      {
+        const { useQueryResult, useMutationResult } = await getNextSnapshot();
+        const [, mutationResult] = useMutationResult;
+
+        expect(useQueryResult.loading).toBe(true);
+        expect(useQueryResult.networkStatus).toBe(NetworkStatus.loading);
+        expect(useQueryResult.data).toBeUndefined();
+
+        expect(mutationResult.loading).toBe(false);
+        expect(mutationResult.called).toBe(false);
+        expect(mutationResult.data).toBeUndefined();
+      }
+
+      {
+        const { useQueryResult, useMutationResult } = await getNextSnapshot();
+        const [, mutationResult] = useMutationResult;
+        const data = getNumbersData();
+
+        expect(data.numbers.numbersArray).toHaveLength(7);
+
+        expect(useQueryResult.loading).toBe(false);
+        expect(useQueryResult.networkStatus).toBe(NetworkStatus.ready);
+        expect(useQueryResult.data).toEqual(data);
+
+        expect(mutationResult.loading).toBe(false);
+        expect(mutationResult.called).toBe(false);
+        expect(mutationResult.data).toBeUndefined();
+      }
+
+      const [mutate] =
+        renderStream.getCurrentRender().snapshot.useMutationResult!;
+
+      let promise = mutate();
+
+      {
+        const { useQueryResult, useMutationResult } = await getNextSnapshot();
+        const [, mutationResult] = useMutationResult;
+        const data = getNumbersData();
+
+        expect(data.numbers.numbersArray).toHaveLength(7);
+
+        expect(useQueryResult.loading).toBe(false);
+        expect(useQueryResult.networkStatus).toBe(NetworkStatus.ready);
+        expect(useQueryResult.data).toEqual(data);
+
+        expect(mutationResult.loading).toBe(true);
+        expect(mutationResult.called).toBe(true);
+        expect(mutationResult.data).toBeUndefined();
+      }
+
+      // Not passing an onQueryUpdated callback should allow cache
+      // broadcasts to propagate as normal. The point of this test is to
+      // demonstrate that *adding* onQueryUpdated should not prevent cache
+      // broadcasts (see below for where we test that).
+      await expect(promise).resolves.toEqual({
+        data: {
+          removeLastNumber: {
+            id: "7",
+          },
+        },
+      });
+
+      expect(getLastNumber()).toEqual({ id: "6", value: 899 });
+
+      {
+        const { useQueryResult, useMutationResult } = await getNextSnapshot();
+        const [, mutationResult] = useMutationResult;
+        const data = getNumbersData();
+
+        expect(data.numbers.numbersArray).toHaveLength(6);
+
+        expect(useQueryResult.loading).toBe(false);
+        expect(useQueryResult.networkStatus).toBe(NetworkStatus.ready);
+        expect(useQueryResult.data).toEqual(data);
+
+        expect(mutationResult.loading).toBe(true);
+        expect(mutationResult.called).toBe(true);
+        expect(mutationResult.data).toBeUndefined();
+      }
+
+      {
+        const { useQueryResult, useMutationResult } = await getNextSnapshot();
+        const [, mutationResult] = useMutationResult;
+        const data = getNumbersData();
+
+        expect(data.numbers.numbersArray).toHaveLength(6);
+
+        expect(useQueryResult.loading).toBe(false);
+        expect(useQueryResult.networkStatus).toBe(NetworkStatus.ready);
+        expect(useQueryResult.data).toEqual(data);
+
+        expect(mutationResult.loading).toBe(false);
+        expect(mutationResult.called).toBe(true);
+        expect(mutationResult.data).toEqual({ removeLastNumber: { id: "7" } });
+      }
+
+      promise = mutate({
+        // Adding this onQueryUpdated callback, which merely examines the
+        // updated query and its DiffResult, should not change the broadcast
+        // behavior of the ObservableQuery.
+        onQueryUpdated(oq, diff) {
+          expect(oq.queryName).toBe("NumbersQuery");
+          expect(diff.result.numbers.numbersArray.length).toBe(5);
+          expect(diff.result.numbers.sum).toBe(2456);
+        },
+      });
+
+      {
+        const { useQueryResult, useMutationResult } = await getNextSnapshot();
+        const [, mutationResult] = useMutationResult;
+        const data = getNumbersData();
+
+        expect(data.numbers.numbersArray).toHaveLength(6);
+
+        expect(useQueryResult.loading).toBe(false);
+        expect(useQueryResult.networkStatus).toBe(NetworkStatus.ready);
+        expect(useQueryResult.data).toEqual(data);
+
+        expect(mutationResult.loading).toBe(true);
+        expect(mutationResult.called).toBe(true);
+        expect(mutationResult.data).toBeUndefined();
+      }
+
+      await expect(promise).resolves.toEqual({
+        data: {
+          removeLastNumber: {
+            id: "6",
+          },
+        },
+      });
+
+      expect(getLastNumber()).toEqual({ id: "5", value: 72 });
+
+      {
+        const { useQueryResult, useMutationResult } = await getNextSnapshot();
+        const [, mutationResult] = useMutationResult;
+        const data = getNumbersData();
+
+        expect(data.numbers.numbersArray).toHaveLength(5);
+
+        expect(useQueryResult.loading).toBe(false);
+        expect(useQueryResult.networkStatus).toBe(NetworkStatus.ready);
+        expect(useQueryResult.data).toEqual(data);
+
+        expect(mutationResult.loading).toBe(true);
+        expect(mutationResult.called).toBe(true);
+        expect(mutationResult.data).toBeUndefined();
+      }
+
+      {
+        const { useQueryResult, useMutationResult } = await getNextSnapshot();
+        const [, mutationResult] = useMutationResult;
+        const data = getNumbersData();
+
+        expect(data.numbers.numbersArray).toHaveLength(5);
+
+        expect(useQueryResult.loading).toBe(false);
+        expect(useQueryResult.networkStatus).toBe(NetworkStatus.ready);
+        expect(useQueryResult.data).toEqual(data);
+
+        expect(mutationResult.loading).toBe(false);
+        expect(mutationResult.called).toBe(true);
+        expect(mutationResult.data).toEqual({ removeLastNumber: { id: "6" } });
+      }
+
+      promise = mutate({
+        onQueryUpdated(oq, diff) {
+          expect(oq.queryName).toBe("NumbersQuery");
+          expect(diff.result.numbers.numbersArray.length).toBe(4);
+          expect(diff.result.numbers.sum).toBe(2384);
+          // Returning false from onQueryUpdated prevents the cache broadcast.
+          return false;
+        },
+      });
+
+      {
+        const { useQueryResult, useMutationResult } = await getNextSnapshot();
+        const [, mutationResult] = useMutationResult;
+        const data = getNumbersData();
+
+        expect(data.numbers.numbersArray).toHaveLength(5);
+
+        expect(useQueryResult.loading).toBe(false);
+        expect(useQueryResult.networkStatus).toBe(NetworkStatus.ready);
+        expect(useQueryResult.data).toEqual(data);
+
+        expect(mutationResult.loading).toBe(true);
+        expect(mutationResult.called).toBe(true);
+        expect(mutationResult.data).toBeUndefined();
+      }
+
+      await expect(promise).resolves.toEqual({
+        data: {
+          removeLastNumber: {
+            id: "5",
+          },
+        },
+      });
+
+      expect(getLastNumber()).toEqual({ id: "4", value: 344 });
+
+      {
+        const { useQueryResult, useMutationResult } = await getNextSnapshot();
+        const [, mutationResult] = useMutationResult;
+        const data = getNumbersData();
+
+        expect(data.numbers.numbersArray).toHaveLength(4);
+
+        expect(useQueryResult.loading).toBe(false);
+        expect(useQueryResult.networkStatus).toBe(NetworkStatus.ready);
+        // This mutation did not braodcast results, so we expect our numbers to
+        // equal the previous set.
+        expect(useQueryResult.data).toEqual(getNumbersData(5));
+
+        expect(mutationResult.loading).toBe(false);
+        expect(mutationResult.called).toBe(true);
+        expect(mutationResult.data).toEqual({ removeLastNumber: { id: "5" } });
+      }
+
+      await expect(renderStream).not.toRerender();
+    });
 
     it("refetchQueries should work with BatchHttpLink", async () => {
       const MUTATION_1 = gql`
@@ -2498,7 +2668,7 @@ describe("useMutation Hook", () => {
       description: "Get milk!",
     };
     it("resolves a deferred mutation with the full result", async () => {
-      const errorSpy = jest.spyOn(console, "error");
+      using consoleSpies = spyOnConsole("error");
       const link = new MockSubscriptionLink();
 
       const client = new ApolloClient({
@@ -2512,7 +2682,7 @@ describe("useMutation Hook", () => {
         );
 
         useEffect(() => {
-          createTodo({ variables });
+          void createTodo({ variables });
         }, [variables]);
 
         return { loading, data };
@@ -2579,11 +2749,10 @@ describe("useMutation Hook", () => {
           __typename: "Todo",
         },
       });
-      expect(errorSpy).not.toHaveBeenCalled();
-      errorSpy.mockRestore();
+      expect(consoleSpies.error).not.toHaveBeenCalled();
     });
     it("resolves with resulting errors and calls onError callback", async () => {
-      const errorSpy = jest.spyOn(console, "error");
+      using consoleSpies = spyOnConsole("error");
       const link = new MockSubscriptionLink();
 
       const client = new ApolloClient({
@@ -2653,12 +2822,11 @@ describe("useMutation Hook", () => {
         expect(onError.mock.calls[0][0].message).toBe(CREATE_TODO_ERROR);
       });
       await waitFor(() => {
-        expect(errorSpy).not.toHaveBeenCalled();
+        expect(consoleSpies.error).not.toHaveBeenCalled();
       });
-      errorSpy.mockRestore();
     });
     it("calls the update function with the final merged result data", async () => {
-      const errorSpy = jest.spyOn(console, "error");
+      using consoleSpies = spyOnConsole("error");
       const link = new MockSubscriptionLink();
       const update = jest.fn();
       const client = new ApolloClient({
@@ -2738,11 +2906,306 @@ describe("useMutation Hook", () => {
         expect.objectContaining({ variables })
       );
       await waitFor(() => {
-        expect(errorSpy).not.toHaveBeenCalled();
+        expect(consoleSpies.error).not.toHaveBeenCalled();
       });
-
-      errorSpy.mockRestore();
     });
+  });
+});
+
+describe("data masking", () => {
+  test("masks data returned from useMutation when dataMasking is `true`", async () => {
+    interface Mutation {
+      updateUser: {
+        __typename: "User";
+        id: number;
+        name: string;
+      };
+    }
+
+    const mutation: TypedDocumentNode<Mutation, never> = gql`
+      mutation MaskedMutation {
+        updateUser {
+          id
+          name
+          ...UserFields
+        }
+      }
+
+      fragment UserFields on User {
+        age
+      }
+    `;
+
+    const mocks = [
+      {
+        request: { query: mutation },
+        result: {
+          data: {
+            updateUser: {
+              __typename: "User",
+              id: 1,
+              name: "Test User",
+              age: 30,
+            },
+          },
+        },
+        delay: 10,
+      },
+    ];
+
+    const client = new ApolloClient({
+      dataMasking: true,
+      cache: new InMemoryCache(),
+      link: new MockLink(mocks),
+    });
+
+    using _disabledAct = disableActEnvironment();
+    const { takeSnapshot } = await renderHookToSnapshotStream(
+      () => useMutation(mutation),
+      {
+        wrapper: ({ children }) => (
+          <ApolloProvider client={client}>{children}</ApolloProvider>
+        ),
+      }
+    );
+
+    const [mutate, result] = await takeSnapshot();
+
+    expect(result.loading).toBe(false);
+    expect(result.data).toBeUndefined();
+    expect(result.error).toBeUndefined();
+
+    {
+      const { data, errors } = await mutate();
+
+      expect(data).toEqual({
+        updateUser: {
+          __typename: "User",
+          id: 1,
+          name: "Test User",
+        },
+      });
+      expect(errors).toBeUndefined();
+    }
+
+    {
+      const [, result] = await takeSnapshot();
+
+      expect(result.loading).toBe(true);
+      expect(result.data).toBeUndefined();
+      expect(result.error).toBeUndefined();
+    }
+
+    {
+      const [, result] = await takeSnapshot();
+
+      expect(result.loading).toBe(false);
+      expect(result.data).toEqual({
+        updateUser: {
+          __typename: "User",
+          id: 1,
+          name: "Test User",
+        },
+      });
+      expect(result.error).toBeUndefined();
+    }
+
+    await expect(takeSnapshot).not.toRerender();
+  });
+
+  test("does not mask data returned from useMutation when dataMasking is `false`", async () => {
+    interface Mutation {
+      updateUser: {
+        __typename: "User";
+        id: number;
+        name: string;
+      };
+    }
+
+    const mutation: TypedDocumentNode<Mutation, never> = gql`
+      mutation MaskedMutation {
+        updateUser {
+          id
+          name
+          ...UserFields
+        }
+      }
+
+      fragment UserFields on User {
+        age
+      }
+    `;
+
+    const mocks = [
+      {
+        request: { query: mutation },
+        result: {
+          data: {
+            updateUser: {
+              __typename: "User",
+              id: 1,
+              name: "Test User",
+              age: 30,
+            },
+          },
+        },
+        delay: 10,
+      },
+    ];
+
+    const client = new ApolloClient({
+      dataMasking: false,
+      cache: new InMemoryCache(),
+      link: new MockLink(mocks),
+    });
+
+    using _disabledAct = disableActEnvironment();
+    const { takeSnapshot } = await renderHookToSnapshotStream(
+      () => useMutation(mutation),
+      {
+        wrapper: ({ children }) => (
+          <ApolloProvider client={client}>{children}</ApolloProvider>
+        ),
+      }
+    );
+
+    const [mutate, result] = await takeSnapshot();
+
+    expect(result.loading).toBe(false);
+    expect(result.data).toBeUndefined();
+    expect(result.error).toBeUndefined();
+
+    {
+      const { data, errors } = await mutate();
+
+      expect(data).toEqual({
+        updateUser: {
+          __typename: "User",
+          id: 1,
+          name: "Test User",
+          age: 30,
+        },
+      });
+      expect(errors).toBeUndefined();
+    }
+
+    {
+      const [, result] = await takeSnapshot();
+
+      expect(result.loading).toBe(true);
+      expect(result.data).toBeUndefined();
+      expect(result.error).toBeUndefined();
+    }
+
+    {
+      const [, result] = await takeSnapshot();
+
+      expect(result.loading).toBe(false);
+      expect(result.data).toEqual({
+        updateUser: {
+          __typename: "User",
+          id: 1,
+          name: "Test User",
+          age: 30,
+        },
+      });
+      expect(result.error).toBeUndefined();
+    }
+
+    await expect(takeSnapshot).not.toRerender();
+  });
+
+  test("passes masked data to onCompleted, does not pass masked data to update", async () => {
+    interface Mutation {
+      updateUser: {
+        __typename: "User";
+        id: number;
+        name: string;
+      };
+    }
+
+    const mutation: TypedDocumentNode<Mutation, never> = gql`
+      mutation MaskedMutation {
+        updateUser {
+          id
+          name
+          ...UserFields
+        }
+      }
+
+      fragment UserFields on User {
+        age
+      }
+    `;
+
+    const mocks = [
+      {
+        request: { query: mutation },
+        result: {
+          data: {
+            updateUser: {
+              __typename: "User",
+              id: 1,
+              name: "Test User",
+              age: 30,
+            },
+          },
+        },
+        delay: 10,
+      },
+    ];
+
+    const cache = new InMemoryCache();
+    const client = new ApolloClient({
+      dataMasking: true,
+      cache,
+      link: new MockLink(mocks),
+    });
+
+    const update = jest.fn();
+    const onCompleted = jest.fn();
+
+    using _disabledAct = disableActEnvironment();
+    const { takeSnapshot } = await renderHookToSnapshotStream(
+      () => useMutation(mutation, { onCompleted, update }),
+      {
+        wrapper: ({ children }) => (
+          <ApolloProvider client={client}>{children}</ApolloProvider>
+        ),
+      }
+    );
+
+    const [mutate] = await takeSnapshot();
+
+    await mutate();
+
+    expect(onCompleted).toHaveBeenCalledTimes(1);
+    expect(onCompleted).toHaveBeenCalledWith(
+      {
+        updateUser: {
+          __typename: "User",
+          id: 1,
+          name: "Test User",
+        },
+      },
+      expect.anything()
+    );
+
+    expect(update).toHaveBeenCalledTimes(1);
+    expect(update).toHaveBeenCalledWith(
+      cache,
+      {
+        data: {
+          updateUser: {
+            __typename: "User",
+            id: 1,
+            name: "Test User",
+            age: 30,
+          },
+        },
+      },
+      { context: undefined, variables: {} }
+    );
   });
 });
 
@@ -2756,5 +3219,174 @@ describe.skip("Type Tests", () => {
         nonExistingVariable: "string",
       },
     });
+  });
+
+  test("uses any as masked and unmasked type when using plain DocumentNode", () => {
+    const mutation = gql`
+      mutation ($id: ID!) {
+        updateUser(id: $id) {
+          id
+          ...UserFields
+        }
+      }
+
+      fragment UserFields on User {
+        age
+      }
+    `;
+
+    const [mutate, { data }] = useMutation(mutation, {
+      optimisticResponse: { foo: "foo" },
+      updateQueries: {
+        TestQuery: (_, { mutationResult }) => {
+          expectTypeOf(mutationResult.data).toMatchTypeOf<any>();
+
+          return {};
+        },
+      },
+      refetchQueries(result) {
+        expectTypeOf(result.data).toMatchTypeOf<any>();
+
+        return "active";
+      },
+      onCompleted(data) {
+        expectTypeOf(data).toMatchTypeOf<any>();
+      },
+      update(_, result) {
+        expectTypeOf(result.data).toMatchTypeOf<any>();
+      },
+    });
+
+    expectTypeOf(data).toMatchTypeOf<any>();
+    expectTypeOf(mutate()).toMatchTypeOf<Promise<FetchResult<any>>>();
+  });
+
+  test("uses TData type when using plain TypedDocumentNode", () => {
+    interface Mutation {
+      updateUser: {
+        __typename: "User";
+        id: string;
+        age: number;
+      };
+    }
+
+    interface Variables {
+      id: string;
+    }
+
+    const mutation: TypedDocumentNode<Mutation, Variables> = gql`
+      mutation ($id: ID!) {
+        updateUser(id: $id) {
+          id
+          ...UserFields
+        }
+      }
+
+      fragment UserFields on User {
+        age
+      }
+    `;
+
+    const [mutate, { data }] = useMutation(mutation, {
+      variables: { id: "1" },
+      optimisticResponse: {
+        updateUser: { __typename: "User", id: "1", age: 30 },
+      },
+      updateQueries: {
+        TestQuery: (_, { mutationResult }) => {
+          expectTypeOf(mutationResult.data).toMatchTypeOf<
+            Mutation | null | undefined
+          >();
+
+          return {};
+        },
+      },
+      refetchQueries(result) {
+        expectTypeOf(result.data).toMatchTypeOf<Mutation | null | undefined>();
+
+        return "active";
+      },
+      onCompleted(data) {
+        expectTypeOf(data).toMatchTypeOf<Mutation>();
+      },
+      update(_, result) {
+        expectTypeOf(result.data).toMatchTypeOf<Mutation | null | undefined>();
+      },
+    });
+
+    expectTypeOf(data).toMatchTypeOf<Mutation | null | undefined>();
+    expectTypeOf(mutate()).toMatchTypeOf<Promise<FetchResult<Mutation>>>();
+  });
+
+  test("uses masked/unmasked type when using Masked<TData>", async () => {
+    type UserFieldsFragment = {
+      __typename: "User";
+      age: number;
+    } & { " $fragmentName": "UserFieldsFragment" };
+
+    type Mutation = {
+      updateUser: {
+        __typename: "User";
+        id: string;
+      } & { " $fragmentRefs": { UserFieldsFragment: UserFieldsFragment } };
+    };
+
+    type UnmaskedMutation = {
+      updateUser: {
+        __typename: "User";
+        id: string;
+        age: number;
+      };
+    };
+
+    interface Variables {
+      id: string;
+    }
+
+    const mutation: TypedDocumentNode<Masked<Mutation>, Variables> = gql`
+      mutation ($id: ID!) {
+        updateUser(id: $id) {
+          id
+          ...UserFields
+        }
+      }
+
+      fragment UserFields on User {
+        age
+      }
+    `;
+
+    const [mutate, { data }] = useMutation(mutation, {
+      optimisticResponse: {
+        updateUser: { __typename: "User", id: "1", age: 30 },
+      },
+      updateQueries: {
+        TestQuery: (_, { mutationResult }) => {
+          expectTypeOf(mutationResult.data).toMatchTypeOf<
+            UnmaskedMutation | null | undefined
+          >();
+
+          return {};
+        },
+      },
+      refetchQueries(result) {
+        expectTypeOf(result.data).toMatchTypeOf<
+          UnmaskedMutation | null | undefined
+        >();
+
+        return "active";
+      },
+      onCompleted(data) {
+        expectTypeOf(data).toMatchTypeOf<Mutation>();
+      },
+      update(_, result) {
+        expectTypeOf(result.data).toMatchTypeOf<
+          UnmaskedMutation | null | undefined
+        >();
+      },
+    });
+
+    expectTypeOf(data).toMatchTypeOf<Mutation | null | undefined>();
+    expectTypeOf(mutate()).toMatchTypeOf<Promise<FetchResult<Mutation>>>();
   });
 });
