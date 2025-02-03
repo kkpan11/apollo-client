@@ -1,12 +1,11 @@
-import gql from 'graphql-tag';
+import gql from "graphql-tag";
 
-import { itAsync } from '../../../testing';
-import { InMemoryCache } from '../inMemoryCache';
-import { visit, FragmentDefinitionNode } from 'graphql';
-import { hasOwn } from '../helpers';
+import { InMemoryCache } from "../inMemoryCache";
+import { visit, FragmentDefinitionNode } from "graphql";
+import { hasOwn } from "../helpers";
 
-describe('fragment matching', () => {
-  it('can match exact types with or without possibleTypes', () => {
+describe("fragment matching", () => {
+  it("can match exact types with or without possibleTypes", () => {
     const cacheWithoutPossibleTypes = new InMemoryCache({
       addTypename: true,
     });
@@ -14,7 +13,7 @@ describe('fragment matching', () => {
     const cacheWithPossibleTypes = new InMemoryCache({
       addTypename: true,
       possibleTypes: {
-        Animal: ['Cat', 'Dog'],
+        Animal: ["Cat", "Dog"],
       },
     });
 
@@ -35,16 +34,16 @@ describe('fragment matching', () => {
     const data = {
       animals: [
         {
-          __typename: 'Cat',
+          __typename: "Cat",
           id: 1,
-          name: 'Felix',
+          name: "Felix",
           livesLeft: 8,
           killsToday: 2,
         },
         {
-          __typename: 'Dog',
+          __typename: "Dog",
           id: 2,
-          name: 'Baxter',
+          name: "Baxter",
         },
       ],
     };
@@ -56,11 +55,11 @@ describe('fragment matching', () => {
     expect(cacheWithPossibleTypes.readQuery({ query })).toEqual(data);
   });
 
-  it('can match interface subtypes', () => {
+  it("can match interface subtypes", () => {
     const cache = new InMemoryCache({
       addTypename: true,
       possibleTypes: {
-        Animal: ['Cat', 'Dog'],
+        Animal: ["Cat", "Dog"],
       },
     });
 
@@ -78,9 +77,9 @@ describe('fragment matching', () => {
 
     const data = {
       bestFriend: {
-        __typename: 'Dog',
+        __typename: "Dog",
         id: 2,
-        name: 'Beckett',
+        name: "Beckett",
       },
     };
 
@@ -88,11 +87,11 @@ describe('fragment matching', () => {
     expect(cache.readQuery({ query })).toEqual(data);
   });
 
-  it('can match union member types', () => {
+  it("can match union member types", () => {
     const cache = new InMemoryCache({
       addTypename: true,
       possibleTypes: {
-        Status: ['PASSING', 'FAILING', 'SKIPPED'],
+        Status: ["PASSING", "FAILING", "SKIPPED"],
       },
     });
 
@@ -115,20 +114,20 @@ describe('fragment matching', () => {
     const data = {
       testResults: [
         {
-          __typename: 'TestResult',
+          __typename: "TestResult",
           id: 123,
           output: {
-            __typename: 'PASSING',
-            stdout: 'ok!',
+            __typename: "PASSING",
+            stdout: "ok!",
           },
         },
         {
-          __typename: 'TestResult',
+          __typename: "TestResult",
           id: 456,
           output: {
-            __typename: 'FAILING',
-            stdout: '',
-            stderr: 'oh no',
+            __typename: "FAILING",
+            stdout: "",
+            stderr: "oh no",
           },
         },
       ],
@@ -138,14 +137,14 @@ describe('fragment matching', () => {
     expect(cache.readQuery({ query })).toEqual(data);
   });
 
-  it('can match indirect subtypes while avoiding cycles', () => {
+  it("can match indirect subtypes while avoiding cycles", () => {
     const cache = new InMemoryCache({
       addTypename: true,
       possibleTypes: {
-        Animal: ['Animal', 'Bug', 'Mammal'],
-        Bug: ['Ant', 'Spider', 'RolyPoly'],
-        Mammal: ['Dog', 'Cat', 'Human'],
-        Cat: ['Calico', 'Siamese', 'Sphynx', 'Tabby'],
+        Animal: ["Animal", "Bug", "Mammal"],
+        Bug: ["Ant", "Spider", "RolyPoly"],
+        Mammal: ["Dog", "Cat", "Human"],
+        Cat: ["Calico", "Siamese", "Sphynx", "Tabby"],
       },
     });
 
@@ -166,18 +165,18 @@ describe('fragment matching', () => {
     const data = {
       animals: [
         {
-          __typename: 'Sphynx',
+          __typename: "Sphynx",
           hasFur: false,
           bodyTemperature: 99,
         },
         {
-          __typename: 'Dog',
+          __typename: "Dog",
           hasFur: true,
           bodyTemperature: 102,
         },
         {
-          __typename: 'Spider',
-          isVenomous: 'maybe',
+          __typename: "Spider",
+          isVenomous: "maybe",
         },
       ],
     };
@@ -186,7 +185,7 @@ describe('fragment matching', () => {
     expect(cache.readQuery({ query })).toEqual(data);
   });
 
-  it('can match against the root Query', () => {
+  it("can match against the root Query", () => {
     const cache = new InMemoryCache({
       addTypename: true,
     });
@@ -210,22 +209,21 @@ describe('fragment matching', () => {
     const data = {
       people: [
         {
-          __typename: 'Person',
+          __typename: "Person",
           id: 123,
-          name: 'Ben',
+          name: "Ben",
         },
       ],
       __type: {
-        __typename: '__Type',
-        name: 'Person',
-        kind: 'OBJECT',
+        __typename: "__Type",
+        name: "Person",
+        kind: "OBJECT",
       },
     };
 
     cache.writeQuery({ query, data });
     expect(cache.readQuery({ query })).toEqual(data);
   });
-
 });
 
 describe("policies.fragmentMatches", () => {
@@ -243,7 +241,7 @@ describe("policies.fragmentMatches", () => {
     console.warn = warn;
   });
 
-  itAsync("can infer fuzzy subtypes heuristically", (resolve, reject) => {
+  it("can infer fuzzy subtypes heuristically", async () => {
     const cache = new InMemoryCache({
       possibleTypes: {
         A: ["B", "C"],
@@ -253,26 +251,38 @@ describe("policies.fragmentMatches", () => {
     });
 
     const fragments = gql`
-      fragment FragA on A { a }
-      fragment FragB on B { b }
-      fragment FragC on C { c }
-      fragment FragD on D { d }
-      fragment FragE on E { e }
-      fragment FragF on F { f }
+      fragment FragA on A {
+        a
+      }
+      fragment FragB on B {
+        b
+      }
+      fragment FragC on C {
+        c
+      }
+      fragment FragD on D {
+        d
+      }
+      fragment FragE on E {
+        e
+      }
+      fragment FragF on F {
+        f
+      }
     `;
 
-    function checkTypes(
-      expected: Record<string, Record<string, boolean>>,
-    ) {
+    function checkTypes(expected: Record<string, Record<string, boolean>>) {
       const checked = new Set<FragmentDefinitionNode>();
 
       visit(fragments, {
         FragmentDefinition(frag) {
           function check(typename: string, result: boolean) {
             if (result !== cache.policies.fragmentMatches(frag, typename)) {
-              reject(`fragment ${
-                frag.name.value
-              } should${result ? "" : " not"} have matched typename ${typename}`);
+              throw new Error(
+                `fragment ${frag.name.value} should${
+                  result ? "" : " not"
+                } have matched typename ${typename}`
+              );
             }
           }
 
@@ -280,7 +290,7 @@ describe("policies.fragmentMatches", () => {
           expect("ABCDEF".split("")).toContain(supertype);
 
           if (hasOwn.call(expected, supertype)) {
-            Object.keys(expected[supertype]).forEach(subtype => {
+            Object.keys(expected[supertype]).forEach((subtype) => {
               check(subtype, expected[supertype][subtype]);
             });
 
@@ -292,71 +302,73 @@ describe("policies.fragmentMatches", () => {
       return checked;
     }
 
-    expect(checkTypes({
-      A: {
-        A: true,
-        B: true,
-        C: true,
-        D: true,
-        E: false,
-        F: false,
-        G: false,
-      },
-      B: {
-        A: false,
-        B: true,
-        C: false,
-        D: true,
-        E: false,
-        F: false,
-        G: false,
-      },
-      C: {
-        A: false,
-        B: false,
-        C: true,
-        D: false,
-        E: false,
-        F: false,
-        G: false,
-      },
-      D: {
-        A: false,
-        B: false,
-        C: false,
-        D: true,
-        E: false,
-        F: false,
-        G: false,
-      },
-      E: {
-        A: false,
-        B: false,
-        C: false,
-        D: false,
-        E: true,
-        F: false,
-        G: false,
-      },
-      F: {
-        A: false,
-        B: false,
-        C: false,
-        D: false,
-        E: false,
-        F: true,
-        G: false,
-      },
-      G: {
-        A: false,
-        B: false,
-        C: false,
-        D: false,
-        E: false,
-        F: false,
-        G: true,
-      },
-    }).size).toBe("ABCDEF".length);
+    expect(
+      checkTypes({
+        A: {
+          A: true,
+          B: true,
+          C: true,
+          D: true,
+          E: false,
+          F: false,
+          G: false,
+        },
+        B: {
+          A: false,
+          B: true,
+          C: false,
+          D: true,
+          E: false,
+          F: false,
+          G: false,
+        },
+        C: {
+          A: false,
+          B: false,
+          C: true,
+          D: false,
+          E: false,
+          F: false,
+          G: false,
+        },
+        D: {
+          A: false,
+          B: false,
+          C: false,
+          D: true,
+          E: false,
+          F: false,
+          G: false,
+        },
+        E: {
+          A: false,
+          B: false,
+          C: false,
+          D: false,
+          E: true,
+          F: false,
+          G: false,
+        },
+        F: {
+          A: false,
+          B: false,
+          C: false,
+          D: false,
+          E: false,
+          F: true,
+          G: false,
+        },
+        G: {
+          A: false,
+          B: false,
+          C: false,
+          D: false,
+          E: false,
+          F: false,
+          G: true,
+        },
+      }).size
+    ).toBe("ABCDEF".length);
 
     cache.writeQuery({
       query: gql`
@@ -390,78 +402,80 @@ describe("policies.fragmentMatches", () => {
       // Note that TooLong is not inferred here.
     ]);
 
-    expect(checkTypes({
-      A: {
-        A: true,
-        B: true,
-        C: true,
-        D: true,
-        E: true,
-        F: true,
-        G: true,
-        H: false,
-      },
-      B: {
-        A: false,
-        B: true,
-        C: false,
-        D: true,
-        E: false,
-        F: false,
-        G: false,
-        H: false,
-      },
-      C: {
-        A: false,
-        B: false,
-        C: true,
-        D: false,
-        E: true,
-        F: true,
-        G: true,
-        H: false,
-      },
-      D: {
-        A: false,
-        B: false,
-        C: false,
-        D: true,
-        E: false,
-        F: false,
-        G: false,
-        H: false,
-      },
-      E: {
-        A: false,
-        B: false,
-        C: false,
-        D: false,
-        E: true,
-        F: false,
-        G: false,
-        H: false,
-      },
-      F: {
-        A: false,
-        B: false,
-        C: false,
-        D: false,
-        E: false,
-        F: true,
-        G: false,
-        H: false,
-      },
-      G: {
-        A: false,
-        B: false,
-        C: false,
-        D: false,
-        E: false,
-        F: true,
-        G: true,
-        H: false,
-      },
-    }).size).toBe("ABCDEF".length);
+    expect(
+      checkTypes({
+        A: {
+          A: true,
+          B: true,
+          C: true,
+          D: true,
+          E: true,
+          F: true,
+          G: true,
+          H: false,
+        },
+        B: {
+          A: false,
+          B: true,
+          C: false,
+          D: true,
+          E: false,
+          F: false,
+          G: false,
+          H: false,
+        },
+        C: {
+          A: false,
+          B: false,
+          C: true,
+          D: false,
+          E: true,
+          F: true,
+          G: true,
+          H: false,
+        },
+        D: {
+          A: false,
+          B: false,
+          C: false,
+          D: true,
+          E: false,
+          F: false,
+          G: false,
+          H: false,
+        },
+        E: {
+          A: false,
+          B: false,
+          C: false,
+          D: false,
+          E: true,
+          F: false,
+          G: false,
+          H: false,
+        },
+        F: {
+          A: false,
+          B: false,
+          C: false,
+          D: false,
+          E: false,
+          F: true,
+          G: false,
+          H: false,
+        },
+        G: {
+          A: false,
+          B: false,
+          C: false,
+          D: false,
+          E: false,
+          F: true,
+          G: true,
+          H: false,
+        },
+      }).size
+    ).toBe("ABCDEF".length);
 
     expect(cache.extract()).toMatchSnapshot();
 
@@ -470,97 +484,97 @@ describe("policies.fragmentMatches", () => {
       C: ["TooLong"],
     });
 
-    expect(checkTypes({
-      A: {
-        A: true,
-        B: true,
-        C: true,
-        D: true,
-        E: true,
-        F: true,
-        G: true,
-        TooLong: true,
-        H: false,
-      },
-      B: {
-        A: false,
-        B: true,
-        C: false,
-        D: true,
-        E: false,
-        F: false,
-        G: false,
-        TooLong: false,
-        H: false,
-      },
-      C: {
-        A: false,
-        B: false,
-        C: true,
-        D: false,
-        E: true,
-        F: true,
-        G: true,
-        TooLong: true,
-        H: false,
-      },
-      D: {
-        A: false,
-        B: false,
-        C: false,
-        D: true,
-        E: false,
-        F: false,
-        G: false,
-        TooLong: false,
-        H: false,
-      },
-      E: {
-        A: false,
-        B: false,
-        C: false,
-        D: false,
-        E: true,
-        F: false,
-        G: false,
-        TooLong: false,
-        H: false,
-      },
-      F: {
-        A: false,
-        B: false,
-        C: false,
-        D: false,
-        E: false,
-        F: true,
-        G: false,
-        TooLong: false,
-        H: false,
-      },
-      G: {
-        A: false,
-        B: false,
-        C: false,
-        D: false,
-        E: false,
-        F: true,
-        G: true,
-        TooLong: false,
-        H: false,
-      },
-      H: {
-        A: false,
-        B: false,
-        C: false,
-        D: false,
-        E: false,
-        F: false,
-        G: false,
-        TooLong: false,
-        H: true,
-      },
-    }).size).toBe("ABCDEF".length);
-
-    resolve();
+    expect(
+      checkTypes({
+        A: {
+          A: true,
+          B: true,
+          C: true,
+          D: true,
+          E: true,
+          F: true,
+          G: true,
+          TooLong: true,
+          H: false,
+        },
+        B: {
+          A: false,
+          B: true,
+          C: false,
+          D: true,
+          E: false,
+          F: false,
+          G: false,
+          TooLong: false,
+          H: false,
+        },
+        C: {
+          A: false,
+          B: false,
+          C: true,
+          D: false,
+          E: true,
+          F: true,
+          G: true,
+          TooLong: true,
+          H: false,
+        },
+        D: {
+          A: false,
+          B: false,
+          C: false,
+          D: true,
+          E: false,
+          F: false,
+          G: false,
+          TooLong: false,
+          H: false,
+        },
+        E: {
+          A: false,
+          B: false,
+          C: false,
+          D: false,
+          E: true,
+          F: false,
+          G: false,
+          TooLong: false,
+          H: false,
+        },
+        F: {
+          A: false,
+          B: false,
+          C: false,
+          D: false,
+          E: false,
+          F: true,
+          G: false,
+          TooLong: false,
+          H: false,
+        },
+        G: {
+          A: false,
+          B: false,
+          C: false,
+          D: false,
+          E: false,
+          F: true,
+          G: true,
+          TooLong: false,
+          H: false,
+        },
+        H: {
+          A: false,
+          B: false,
+          C: false,
+          D: false,
+          E: false,
+          F: false,
+          G: false,
+          TooLong: false,
+          H: true,
+        },
+      }).size
+    ).toBe("ABCDEF".length);
   });
 });

@@ -7,9 +7,13 @@ import {
   within,
 } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { act } from "react-dom/test-utils";
+import { act } from "@testing-library/react";
 
-import { UseFragmentOptions, useFragment } from "../useFragment";
+import {
+  UseFragmentOptions,
+  UseFragmentResult,
+  useFragment,
+} from "../useFragment";
 import { MockedProvider } from "../../../testing";
 import { ApolloProvider } from "../../context";
 import {
@@ -29,6 +33,14 @@ import { concatPagination } from "../../../utilities";
 import assert from "assert";
 import { expectTypeOf } from "expect-type";
 import { SubscriptionObserver } from "zen-observable-ts";
+import { spyOnConsole } from "../../../testing/internal";
+import { FragmentType } from "../../../masking";
+import {
+  disableActEnvironment,
+  createRenderStream,
+  renderHookToSnapshotStream,
+  useTrackRenders,
+} from "@testing-library/react-render-stream";
 
 describe("useFragment", () => {
   it("is importable and callable", () => {
@@ -141,7 +153,7 @@ describe("useFragment", () => {
 
     expect(renders).toEqual(["list", "item 1", "item 2", "item 5"]);
 
-    act(() => {
+    await act(async () => {
       cache.writeFragment({
         fragment: ItemFragment,
         data: {
@@ -165,7 +177,7 @@ describe("useFragment", () => {
       "item 2",
     ]);
 
-    act(() => {
+    await act(async () => {
       cache.modify({
         fields: {
           list(list: readonly Reference[], { readField }) {
@@ -222,7 +234,7 @@ describe("useFragment", () => {
       "item 5",
     ]);
 
-    act(() => {
+    await act(async () => {
       cache.writeFragment({
         fragment: ItemFragment,
         data: {
@@ -259,6 +271,45 @@ describe("useFragment", () => {
       "item 4",
     ]);
 
+    // set Item #2 back to its original value
+    await act(async () => {
+      cache.writeFragment({
+        fragment: ItemFragment,
+        data: {
+          __typename: "Item",
+          id: 2,
+          text: "Item #2",
+        },
+      });
+    });
+
+    await waitFor(() => {
+      expect(getItemTexts()).toEqual([
+        "Item #1",
+        "Item #2",
+        "Item #3 from cache.modify",
+        "Item #4 updated",
+        "Item #5",
+      ]);
+    });
+
+    expect(renders).toEqual([
+      "list",
+      "item 1",
+      "item 2",
+      "item 5",
+      "item 2",
+      "list",
+      "item 1",
+      "item 2",
+      "item 3",
+      "item 4",
+      "item 5",
+      "item 4",
+      // Only the second item should have re-rendered.
+      "item 2",
+    ]);
+
     expect(cache.extract()).toEqual({
       "Item:1": {
         __typename: "Item",
@@ -267,7 +318,7 @@ describe("useFragment", () => {
       "Item:2": {
         __typename: "Item",
         id: 2,
-        text: "Item #2 updated",
+        text: "Item #2",
       },
       "Item:3": {
         __typename: "Item",
@@ -330,6 +381,55 @@ describe("useFragment", () => {
 
     // would throw if not present synchronously
     screen.getByText(/Item #1/);
+  });
+
+  it("allows the client to be overriden", () => {
+    const ItemFragment: TypedDocumentNode<Item> = gql`
+      fragment ItemFragment on Item {
+        id
+        text
+      }
+    `;
+    const cache = new InMemoryCache();
+    const item = { __typename: "Item", id: 1, text: "Item #1" };
+    cache.writeFragment({
+      fragment: ItemFragment,
+      data: item,
+    });
+    const client = new ApolloClient({
+      cache,
+    });
+    function Component() {
+      const { data } = useFragment({
+        fragment: ItemFragment,
+        from: { __typename: "Item", id: 1 },
+        client,
+      });
+      return <>{data.text}</>;
+    }
+
+    // Without a MockedProvider supplying the client via context,
+    // the client must be passed directly to the hook or an error is thrown
+    expect(() => render(<Component />)).not.toThrow(/pass an ApolloClient/);
+
+    // Item #1 is rendered
+    screen.getByText(/Item #1/);
+  });
+
+  it("throws if no client is provided", () => {
+    function Component() {
+      const { data } = useFragment({
+        fragment: ItemFragment,
+        from: { __typename: "Item", id: 1 },
+      });
+      return <>{data.text}</>;
+    }
+
+    // silence the console error
+    {
+      using _spy = spyOnConsole("error");
+      expect(() => render(<Component />)).toThrow(/pass an ApolloClient/);
+    }
   });
 
   it.each<TypedDocumentNode<{ list: Item[] }>>([
@@ -790,7 +890,7 @@ describe("useFragment", () => {
 
     expect(renders).toEqual(["list", "item 1", "item 2", "item 5"]);
 
-    act(() => {
+    await act(async () => {
       cache.writeFragment({
         fragment: ItemFragment,
         data: {
@@ -814,7 +914,7 @@ describe("useFragment", () => {
       "item 2",
     ]);
 
-    act(() => {
+    await act(async () => {
       cache.modify({
         fields: {
           list(list: readonly Reference[], { readField }) {
@@ -869,7 +969,7 @@ describe("useFragment", () => {
       "item 5",
     ]);
 
-    act(() => {
+    await act(async () => {
       cache.writeFragment({
         fragment: ItemFragment,
         data: {
@@ -1230,29 +1330,29 @@ describe("useFragment", () => {
         from: { __typename: "Query" },
       });
 
-      return complete ? (
-        <>
-          <select
-            onChange={(e) => {
-              setCurrentItem(parseInt(e.currentTarget.value));
-            }}
-          >
-            {data.list.map((item) => (
-              <option key={item.id} value={item.id}>
-                Select item {item.id}
-              </option>
-            ))}
-          </select>
-          <div>
-            <Item id={currentItem} />
-          </div>
-          <ol>
-            {data.list.map((item) => (
-              <Item key={item.id} id={item.id} />
-            ))}
-          </ol>
-        </>
-      ) : null;
+      return complete ?
+          <>
+            <select
+              onChange={(e) => {
+                setCurrentItem(parseInt(e.currentTarget.value));
+              }}
+            >
+              {data.list.map((item) => (
+                <option key={item.id} value={item.id}>
+                  Select item {item.id}
+                </option>
+              ))}
+            </select>
+            <div>
+              <Item id={currentItem} />
+            </div>
+            <ol>
+              {data.list.map((item) => (
+                <Item key={item.id} id={item.id} />
+              ))}
+            </ol>
+          </>
+        : null;
     }
 
     function Item({ id }: { id: number }) {
@@ -1309,6 +1409,338 @@ describe("useFragment", () => {
     });
   });
 
+  it("returns correct data when options change", async () => {
+    const client = new ApolloClient({
+      cache: new InMemoryCache(),
+    });
+    type User = { __typename: "User"; id: number; name: string };
+    const fragment: TypedDocumentNode<User> = gql`
+      fragment UserFragment on User {
+        id
+        name
+      }
+    `;
+
+    client.writeFragment({
+      fragment,
+      data: { __typename: "User", id: 1, name: "Alice" },
+    });
+
+    client.writeFragment({
+      fragment,
+      data: { __typename: "User", id: 2, name: "Charlie" },
+    });
+
+    using _disabledAct = disableActEnvironment();
+    const { takeSnapshot, rerender } = await renderHookToSnapshotStream(
+      ({ id }) => useFragment({ fragment, from: { __typename: "User", id } }),
+      {
+        initialProps: { id: 1 },
+        wrapper: ({ children }) => (
+          <ApolloProvider client={client}>{children}</ApolloProvider>
+        ),
+      }
+    );
+
+    {
+      const snapshot = await takeSnapshot();
+
+      expect(snapshot).toEqual({
+        complete: true,
+        data: { __typename: "User", id: 1, name: "Alice" },
+      });
+    }
+
+    await rerender({ id: 2 });
+
+    {
+      const snapshot = await takeSnapshot();
+
+      expect(snapshot).toEqual({
+        complete: true,
+        data: { __typename: "User", id: 2, name: "Charlie" },
+      });
+    }
+
+    await expect(takeSnapshot).not.toRerender();
+  });
+
+  it("does not rerender when fields with @nonreactive change", async () => {
+    type Post = {
+      __typename: "Post";
+      id: number;
+      title: string;
+      updatedAt: string;
+    };
+
+    const client = new ApolloClient({
+      cache: new InMemoryCache(),
+    });
+
+    const fragment: TypedDocumentNode<Post> = gql`
+      fragment PostFragment on Post {
+        id
+        title
+        updatedAt @nonreactive
+      }
+    `;
+
+    client.writeFragment({
+      fragment,
+      data: {
+        __typename: "Post",
+        id: 1,
+        title: "Blog post",
+        updatedAt: "2024-01-01",
+      },
+    });
+
+    using _disabledAct = disableActEnvironment();
+    const { takeSnapshot } = await renderHookToSnapshotStream(
+      () => useFragment({ fragment, from: { __typename: "Post", id: 1 } }),
+      {
+        wrapper: ({ children }) => (
+          <ApolloProvider client={client}>{children}</ApolloProvider>
+        ),
+      }
+    );
+
+    {
+      const snapshot = await takeSnapshot();
+
+      expect(snapshot).toEqual({
+        complete: true,
+        data: {
+          __typename: "Post",
+          id: 1,
+          title: "Blog post",
+          updatedAt: "2024-01-01",
+        },
+      });
+    }
+
+    client.writeFragment({
+      fragment,
+      data: {
+        __typename: "Post",
+        id: 1,
+        title: "Blog post",
+        updatedAt: "2024-02-01",
+      },
+    });
+
+    await expect(takeSnapshot).not.toRerender();
+  });
+
+  it("does not rerender when fields with @nonreactive on nested fragment change", async () => {
+    type Post = {
+      __typename: "Post";
+      id: number;
+      title: string;
+      updatedAt: string;
+    };
+
+    const client = new ApolloClient({
+      cache: new InMemoryCache(),
+    });
+
+    const fragment: TypedDocumentNode<Post> = gql`
+      fragment PostFragment on Post {
+        id
+        title
+        ...PostFields @nonreactive
+      }
+
+      fragment PostFields on Post {
+        updatedAt
+      }
+    `;
+
+    client.writeFragment({
+      fragment,
+      fragmentName: "PostFragment",
+      data: {
+        __typename: "Post",
+        id: 1,
+        title: "Blog post",
+        updatedAt: "2024-01-01",
+      },
+    });
+
+    using _disabledAct = disableActEnvironment();
+    const { takeSnapshot } = await renderHookToSnapshotStream(
+      () =>
+        useFragment({
+          fragment,
+          fragmentName: "PostFragment",
+          from: { __typename: "Post", id: 1 },
+        }),
+      {
+        wrapper: ({ children }) => (
+          <ApolloProvider client={client}>{children}</ApolloProvider>
+        ),
+      }
+    );
+
+    {
+      const snapshot = await takeSnapshot();
+
+      expect(snapshot).toEqual({
+        complete: true,
+        data: {
+          __typename: "Post",
+          id: 1,
+          title: "Blog post",
+          updatedAt: "2024-01-01",
+        },
+      });
+    }
+
+    client.writeFragment({
+      fragment,
+      fragmentName: "PostFragment",
+      data: {
+        __typename: "Post",
+        id: 1,
+        title: "Blog post",
+        updatedAt: "2024-02-01",
+      },
+    });
+
+    await expect(takeSnapshot).not.toRerender();
+  });
+
+  it("warns when passing parent object to `from` when key fields are missing", async () => {
+    using _ = spyOnConsole("warn");
+
+    interface Fragment {
+      age: number;
+    }
+
+    const fragment: TypedDocumentNode<Fragment, never> = gql`
+      fragment UserFields on User {
+        age
+      }
+    `;
+
+    const client = new ApolloClient({ cache: new InMemoryCache() });
+
+    using _disabledAct = disableActEnvironment();
+    const { takeSnapshot } = await renderHookToSnapshotStream(
+      () => useFragment({ fragment, from: { __typename: "User" } }),
+      {
+        wrapper: ({ children }) => (
+          <ApolloProvider client={client}>{children}</ApolloProvider>
+        ),
+      }
+    );
+
+    {
+      const { data, complete } = await takeSnapshot();
+
+      expect(data).toEqual({});
+      // TODO: Update when https://github.com/apollographql/apollo-client/issues/12003 is fixed
+      expect(complete).toBe(true);
+    }
+
+    expect(console.warn).toHaveBeenCalledTimes(1);
+    expect(console.warn).toHaveBeenCalledWith(
+      "Could not identify object passed to `from` for '%s' fragment, either because the object is non-normalized or the key fields are missing. If you are masking this object, please ensure the key fields are requested by the parent object.",
+      "UserFields"
+    );
+  });
+
+  it("allows `null` as valid `from` value without warning", async () => {
+    using _ = spyOnConsole("warn");
+
+    interface Fragment {
+      age: number;
+    }
+
+    const fragment: TypedDocumentNode<Fragment, never> = gql`
+      fragment UserFields on User {
+        age
+      }
+    `;
+
+    const client = new ApolloClient({ cache: new InMemoryCache() });
+
+    using _disabledAct = disableActEnvironment();
+    const { takeSnapshot } = await renderHookToSnapshotStream(
+      () => useFragment({ fragment, from: null }),
+      {
+        wrapper: ({ children }) => (
+          <ApolloProvider client={client}>{children}</ApolloProvider>
+        ),
+      }
+    );
+
+    {
+      const { data, complete } = await takeSnapshot();
+
+      expect(data).toEqual({});
+      expect(complete).toBe(false);
+    }
+
+    expect(console.warn).not.toHaveBeenCalled();
+  });
+
+  it("properly handles changing from null to valid from value", async () => {
+    using _ = spyOnConsole("warn");
+
+    interface Fragment {
+      __typename: "User";
+      id: string;
+      age: number;
+    }
+
+    const fragment: TypedDocumentNode<Fragment, never> = gql`
+      fragment UserFields on User {
+        __typename
+        id
+        age
+      }
+    `;
+
+    const client = new ApolloClient({ cache: new InMemoryCache() });
+
+    client.writeFragment({
+      fragment,
+      data: {
+        __typename: "User",
+        id: "1",
+        age: 30,
+      },
+    });
+
+    using _disabledAct = disableActEnvironment();
+    const { takeSnapshot, rerender } = await renderHookToSnapshotStream(
+      ({ from }) => useFragment({ fragment, from }),
+      {
+        initialProps: { from: null as UseFragmentOptions<any, never>["from"] },
+        wrapper: ({ children }) => (
+          <ApolloProvider client={client}>{children}</ApolloProvider>
+        ),
+      }
+    );
+
+    {
+      const { data, complete } = await takeSnapshot();
+
+      expect(data).toEqual({});
+      expect(complete).toBe(false);
+    }
+
+    await rerender({ from: { __typename: "User", id: "1" } });
+
+    {
+      const { data, complete } = await takeSnapshot();
+
+      expect(data).toEqual({ __typename: "User", id: "1", age: 30 });
+      expect(complete).toBe(true);
+    }
+  });
+
   describe("tests with incomplete data", () => {
     let cache: InMemoryCache, wrapper: React.FunctionComponent;
     const ItemFragment = gql`
@@ -1325,15 +1757,16 @@ describe("useFragment", () => {
       );
 
       // silence the console for the incomplete fragment write
-      const spy = jest.spyOn(console, "error").mockImplementation(() => {});
-      cache.writeFragment({
-        fragment: ItemFragment,
-        data: {
-          __typename: "Item",
-          id: 5,
-        },
-      });
-      spy.mockRestore();
+      {
+        using _spy = spyOnConsole("error");
+        cache.writeFragment({
+          fragment: ItemFragment,
+          data: {
+            __typename: "Item",
+            id: 5,
+          },
+        });
+      }
     });
 
     it("assumes `returnPartialData: true` per default", () => {
@@ -1438,6 +1871,297 @@ describe("useFragment", () => {
   });
 });
 
+describe("data masking", () => {
+  it("returns masked fragment when data masking is enabled", async () => {
+    type Post = {
+      __typename: "Post";
+      id: number;
+      title: string;
+    };
+
+    const client = new ApolloClient({
+      dataMasking: true,
+      cache: new InMemoryCache(),
+    });
+
+    const fragment: TypedDocumentNode<Post> = gql`
+      fragment PostFragment on Post {
+        id
+        title
+        ...PostFields
+      }
+
+      fragment PostFields on Post {
+        updatedAt
+      }
+    `;
+
+    client.writeFragment({
+      fragment,
+      fragmentName: "PostFragment",
+      data: {
+        __typename: "Post",
+        id: 1,
+        title: "Blog post",
+        // @ts-expect-error Need to determine how to work with masked types
+        updatedAt: "2024-01-01",
+      },
+    });
+
+    using _disabledAct = disableActEnvironment();
+    const { takeSnapshot } = await renderHookToSnapshotStream(
+      () =>
+        useFragment({
+          fragment,
+          fragmentName: "PostFragment",
+          from: { __typename: "Post", id: 1 },
+        }),
+      {
+        wrapper: ({ children }) => (
+          <ApolloProvider client={client}>{children}</ApolloProvider>
+        ),
+      }
+    );
+
+    {
+      const snapshot = await takeSnapshot();
+
+      expect(snapshot).toEqual({
+        complete: true,
+        data: {
+          __typename: "Post",
+          id: 1,
+          title: "Blog post",
+        },
+      });
+    }
+
+    await expect(takeSnapshot).not.toRerender();
+  });
+
+  it("does not rerender for cache writes to masked fields", async () => {
+    type Post = {
+      __typename: "Post";
+      id: number;
+      title: string;
+    };
+
+    const client = new ApolloClient({
+      dataMasking: true,
+      cache: new InMemoryCache(),
+    });
+
+    const fragment: TypedDocumentNode<Post> = gql`
+      fragment PostFragment on Post {
+        id
+        title
+        ...PostFields
+      }
+
+      fragment PostFields on Post {
+        updatedAt
+      }
+    `;
+
+    client.writeFragment({
+      fragment,
+      fragmentName: "PostFragment",
+      data: {
+        __typename: "Post",
+        id: 1,
+        title: "Blog post",
+        // @ts-expect-error Need to determine how to work with masked types
+        updatedAt: "2024-01-01",
+      },
+    });
+
+    using _disabledAct = disableActEnvironment();
+    const { takeSnapshot } = await renderHookToSnapshotStream(
+      () =>
+        useFragment({
+          fragment,
+          fragmentName: "PostFragment",
+          from: { __typename: "Post", id: 1 },
+        }),
+      {
+        wrapper: ({ children }) => (
+          <ApolloProvider client={client}>{children}</ApolloProvider>
+        ),
+      }
+    );
+
+    {
+      const snapshot = await takeSnapshot();
+
+      expect(snapshot).toEqual({
+        complete: true,
+        data: {
+          __typename: "Post",
+          id: 1,
+          title: "Blog post",
+        },
+      });
+    }
+
+    client.writeFragment({
+      fragment,
+      fragmentName: "PostFragment",
+      data: {
+        __typename: "Post",
+        id: 1,
+        title: "Blog post",
+        // @ts-expect-error Need to determine how to work with masked types
+        updatedAt: "2024-02-01",
+      },
+    });
+
+    await expect(takeSnapshot).not.toRerender();
+  });
+
+  it("updates child fragments for cache updates to masked fields", async () => {
+    type ParentFragment = {
+      __typename: "Post";
+      id: number;
+      title: string;
+    };
+
+    type ChildFragment = {
+      __typename: "Post";
+      id: number;
+      title: string;
+    };
+
+    const client = new ApolloClient({
+      dataMasking: true,
+      cache: new InMemoryCache(),
+    });
+
+    const childFragment: TypedDocumentNode<ChildFragment> = gql`
+      fragment PostFields on Post {
+        updatedAt
+      }
+    `;
+
+    const parentFragment: TypedDocumentNode<ParentFragment> = gql`
+      fragment PostFragment on Post {
+        id
+        title
+        ...PostFields
+      }
+
+      ${childFragment}
+    `;
+
+    client.writeFragment({
+      fragment: parentFragment,
+      fragmentName: "PostFragment",
+      data: {
+        __typename: "Post",
+        id: 1,
+        title: "Blog post",
+        // @ts-expect-error Need to determine how to work with masked types
+        updatedAt: "2024-01-01",
+      },
+    });
+
+    const renderStream = createRenderStream({
+      initialSnapshot: {
+        parent: null as UseFragmentResult<ParentFragment> | null,
+        child: null as UseFragmentResult<ChildFragment> | null,
+      },
+    });
+
+    function Parent() {
+      useTrackRenders();
+      const parent = useFragment({
+        fragment: parentFragment,
+        fragmentName: "PostFragment",
+        from: { __typename: "Post", id: 1 },
+      });
+
+      renderStream.mergeSnapshot({ parent });
+
+      return parent.complete ? <Child parent={parent.data} /> : null;
+    }
+
+    function Child({ parent }: { parent: ParentFragment }) {
+      useTrackRenders();
+      const child = useFragment({ fragment: childFragment, from: parent });
+
+      renderStream.mergeSnapshot({ child });
+
+      return null;
+    }
+
+    using _disabledAct = disableActEnvironment();
+    await renderStream.render(<Parent />, {
+      wrapper: ({ children }) => (
+        <ApolloProvider client={client}>{children}</ApolloProvider>
+      ),
+    });
+
+    {
+      const { snapshot, renderedComponents } = await renderStream.takeRender();
+
+      expect(renderedComponents).toStrictEqual([Parent, Child]);
+      expect(snapshot).toEqual({
+        parent: {
+          complete: true,
+          data: {
+            __typename: "Post",
+            id: 1,
+            title: "Blog post",
+          },
+        },
+        child: {
+          complete: true,
+          data: {
+            __typename: "Post",
+            updatedAt: "2024-01-01",
+          },
+        },
+      });
+    }
+
+    client.writeFragment({
+      fragment: parentFragment,
+      fragmentName: "PostFragment",
+      data: {
+        __typename: "Post",
+        id: 1,
+        title: "Blog post",
+        // @ts-expect-error Need to determine how to work with masked types
+        updatedAt: "2024-02-01",
+      },
+    });
+
+    {
+      const { snapshot, renderedComponents } = await renderStream.takeRender();
+
+      expect(renderedComponents).toStrictEqual([Child]);
+      expect(snapshot).toEqual({
+        parent: {
+          complete: true,
+          data: {
+            __typename: "Post",
+            id: 1,
+            title: "Blog post",
+          },
+        },
+        child: {
+          complete: true,
+          data: {
+            __typename: "Post",
+            updatedAt: "2024-02-01",
+          },
+        },
+      });
+    }
+
+    await expect(renderStream).not.toRerender();
+  });
+});
+
 describe("has the same timing as `useQuery`", () => {
   const itemFragment = gql`
     fragment ItemFragment on Item {
@@ -1474,26 +2198,47 @@ describe("has the same timing as `useQuery`", () => {
         from: initialItem,
       });
 
-      if (!queryData) {
-        expect(fragmentData).toStrictEqual({});
-      } else {
-        expect({ item: fragmentData }).toStrictEqual(queryData);
-      }
+      renderStream.replaceSnapshot({ queryData, fragmentData });
+
       return complete ? JSON.stringify(fragmentData) : "loading";
     }
-    render(<Component />, {
+
+    using _disabledAct = disableActEnvironment();
+    const renderStream = createRenderStream({
+      initialSnapshot: {
+        queryData: undefined as any,
+        fragmentData: undefined as any,
+      },
+    });
+    await renderStream.render(<Component />, {
       wrapper: ({ children }) => (
         <ApolloProvider client={client}>{children}</ApolloProvider>
       ),
     });
-    await screen.findByText(/loading/);
+
+    {
+      const { snapshot } = await renderStream.takeRender();
+      expect(snapshot.queryData).toBe(undefined);
+      expect(snapshot.fragmentData).toStrictEqual({});
+    }
+
     assert(observer!);
     observer.next({ data: { item: initialItem } });
     observer.complete();
-    await screen.findByText(/Item #initial/);
+
+    {
+      const { snapshot } = await renderStream.takeRender();
+      expect(snapshot.queryData).toStrictEqual({ item: initialItem });
+      expect(snapshot.fragmentData).toStrictEqual(initialItem);
+    }
+
     cache.writeQuery({ query, data: { item: updatedItem } });
-    await screen.findByText(/Item #updated/);
-    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    {
+      const { snapshot } = await renderStream.takeRender();
+      expect(snapshot.queryData).toStrictEqual({ item: updatedItem });
+      expect(snapshot.fragmentData).toStrictEqual(updatedItem);
+    }
   });
 
   it("`useQuery` in parent, `useFragment` in child", async () => {
@@ -1513,28 +2258,9 @@ describe("has the same timing as `useQuery`", () => {
     });
     cache.writeQuery({ query, data: { items: [item1, item2] } });
 
-    const valuePairs: Array<
-      [item: string, parentCount: number, childCount: number]
-    > = [];
-    function captureDOMState() {
-      const parent = screen.getByTestId("parent");
-      const children = screen.getByTestId("children");
-      valuePairs.push([
-        "Item 1",
-        within(parent).queryAllByText(/Item #1/).length,
-        within(children).queryAllByText(/Item #1/).length,
-      ]);
-      valuePairs.push([
-        "Item 2",
-        within(parent).queryAllByText(/Item #2/).length,
-        within(children).queryAllByText(/Item #2/).length,
-      ]);
-    }
-
     function Parent() {
       const { data } = useQuery(query);
       if (!data) throw new Error("should never happen");
-      React.useEffect(captureDOMState);
       return (
         <>
           <div data-testid="parent">
@@ -1555,25 +2281,44 @@ describe("has the same timing as `useQuery`", () => {
         fragment: itemFragment,
         from: { __typename: "Item", id },
       });
-      React.useEffect(captureDOMState);
       return <>{JSON.stringify({ item: data })}</>;
     }
 
-    render(<Parent />, {
+    using _disabledAct = disableActEnvironment();
+    const renderStream = createRenderStream({
+      snapshotDOM: true,
+      onRender() {
+        const parent = screen.getByTestId("parent");
+        const children = screen.getByTestId("children");
+        expect(within(parent).queryAllByText(/Item #1/).length).toBe(
+          within(children).queryAllByText(/Item #1/).length
+        );
+        expect(within(parent).queryAllByText(/Item #2/).length).toBe(
+          within(children).queryAllByText(/Item #2/).length
+        );
+      },
+    });
+    await renderStream.render(<Parent />, {
       wrapper: ({ children }) => (
         <ApolloProvider client={client}>{children}</ApolloProvider>
       ),
     });
+
+    {
+      const { withinDOM } = await renderStream.takeRender();
+      expect(withinDOM().queryAllByText(/Item #2/).length).toBe(2);
+    }
+
     cache.evict({
       id: cache.identify(item2),
     });
-    await waitFor(() => {
-      expect(() => screen.getByText(/Item #2/)).toThrow();
-    });
 
-    for (const [_item, parentChount, childCount] of valuePairs) {
-      expect(parentChount).toBe(childCount);
+    {
+      const { withinDOM } = await renderStream.takeRender();
+      expect(withinDOM().queryAllByText(/Item #2/).length).toBe(0);
     }
+
+    await expect(renderStream).toRenderExactlyTimes(2);
   });
 
   /**
@@ -1604,24 +2349,6 @@ describe("has the same timing as `useQuery`", () => {
     });
     cache.writeQuery({ query, data: { items: [item1, item2] } });
 
-    const valuePairs: Array<
-      [item: string, parentCount: number, childCount: number]
-    > = [];
-    function captureDOMState() {
-      const parent = screen.getByTestId("parent");
-      const children = screen.getByTestId("children");
-      valuePairs.push([
-        "Item 1",
-        within(parent).queryAllByText(/Item #1/).length,
-        within(children).queryAllByText(/Item #1/).length,
-      ]);
-      valuePairs.push([
-        "Item 2",
-        within(parent).queryAllByText(/Item #2/).length,
-        within(children).queryAllByText(/Item #2/).length,
-      ]);
-    }
-
     function Parent() {
       const { data: data1 } = useFragment({
         fragment: itemFragment,
@@ -1631,7 +2358,6 @@ describe("has the same timing as `useQuery`", () => {
         fragment: itemFragment,
         from: { __typename: "Item", id: 2 },
       });
-      React.useEffect(captureDOMState);
       return (
         <>
           <div data-testid="parent">
@@ -1649,28 +2375,43 @@ describe("has the same timing as `useQuery`", () => {
     function Child() {
       const { data } = useQuery(query);
       if (!data) throw new Error("should never happen");
-      React.useEffect(captureDOMState);
       return <>{JSON.stringify(data)}</>;
     }
 
-    render(<Parent />, {
+    using _disabledAct = disableActEnvironment();
+    const renderStream = createRenderStream({
+      onRender() {
+        const parent = screen.getByTestId("parent");
+        const children = screen.getByTestId("children");
+        expect(within(parent).queryAllByText(/Item #1/).length).toBe(
+          within(children).queryAllByText(/Item #1/).length
+        );
+        expect(within(parent).queryAllByText(/Item #2/).length).toBe(
+          within(children).queryAllByText(/Item #2/).length
+        );
+      },
+    });
+    await renderStream.render(<Parent />, {
       wrapper: ({ children }) => (
         <ApolloProvider client={client}>{children}</ApolloProvider>
       ),
     });
-    act(
-      () =>
-        void cache.evict({
-          id: cache.identify(item2),
-        })
-    );
-    await waitFor(() => {
-      expect(() => screen.getByText(/Item #2/)).toThrow();
+
+    {
+      const { withinDOM } = await renderStream.takeRender();
+      expect(withinDOM().queryAllByText(/Item #2/).length).toBe(2);
+    }
+
+    cache.evict({
+      id: cache.identify(item2),
     });
 
-    for (const [_item, parentChount, childCount] of valuePairs) {
-      expect(parentChount).toBe(childCount);
+    {
+      const { withinDOM } = await renderStream.takeRender();
+      expect(withinDOM().queryAllByText(/Item #2/).length).toBe(0);
     }
+
+    await expect(renderStream).toRenderExactlyTimes(3);
   });
 });
 
@@ -1690,12 +2431,13 @@ describe.skip("Type Tests", () => {
 
   test("UseFragmentOptions interface shape", <TData, TVars>() => {
     expectTypeOf<UseFragmentOptions<TData, TVars>>().branded.toEqualTypeOf<{
-      from: string | StoreObject | Reference;
+      from: string | StoreObject | Reference | FragmentType<TData> | null;
       fragment: DocumentNode | TypedDocumentNode<TData, TVars>;
       fragmentName?: string;
       optimistic?: boolean;
       variables?: TVars;
       canonizeResults?: boolean;
+      client?: ApolloClient<any>;
     }>();
   });
 });

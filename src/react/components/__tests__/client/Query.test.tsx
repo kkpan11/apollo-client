@@ -10,6 +10,11 @@ import { InMemoryCache } from "../../../../cache";
 import { ApolloProvider } from "../../../context";
 import { itAsync, MockedProvider, mockSingleLink } from "../../../../testing";
 import { Query } from "../../Query";
+import { QueryResult } from "../../../types/types";
+import {
+  disableActEnvironment,
+  createRenderStream,
+} from "@testing-library/react-render-stream";
 
 const allPeopleQuery: DocumentNode = gql`
   query people {
@@ -205,13 +210,15 @@ describe("Query component", () => {
       ];
 
       const Component = () => (
-        <Query query={allPeopleQuery} data-ref={React.useRef()}>
+        <Query query={allPeopleQuery} data-ref={React.useRef(void 0)}>
           {(result: any) => {
             if (result.loading) {
               return null;
             }
             try {
-              expect(result.error).toEqual(new Error("error occurred"));
+              expect(result.error).toEqual(
+                new ApolloError({ networkError: new Error("error occurred") })
+              );
               finished = true;
             } catch (error) {
               reject(error);
@@ -367,16 +374,16 @@ describe("Query component", () => {
                   .fetchMore({
                     variables: { first: 1 },
                     updateQuery: (prev: any, { fetchMoreResult }: any) =>
-                      fetchMoreResult
-                        ? {
-                            allPeople: {
-                              people: [
-                                ...prev.allPeople.people,
-                                ...fetchMoreResult.allPeople.people,
-                              ],
-                            },
-                          }
-                        : prev,
+                      fetchMoreResult ?
+                        {
+                          allPeople: {
+                            people: [
+                              ...prev.allPeople.people,
+                              ...fetchMoreResult.allPeople.people,
+                            ],
+                          },
+                        }
+                      : prev,
                   })
                   .then((result2: any) => {
                     expect(result2.data).toEqual(data2);
@@ -1481,8 +1488,6 @@ describe("Query component", () => {
       cache: new InMemoryCache({ addTypename: false }),
     });
 
-    let count = 0;
-    let testFailures: any[] = [];
     const noop = () => null;
 
     const AllPeopleQuery2 = Query;
@@ -1490,75 +1495,68 @@ describe("Query component", () => {
     function Container() {
       return (
         <AllPeopleQuery2 query={query} notifyOnNetworkStatusChange={true}>
-          {(result: any) => {
-            try {
-              switch (count++) {
-                case 0:
-                  // Waiting for the first result to load
-                  expect(result.loading).toBe(true);
-                  break;
-                case 1:
-                  // First result is loaded, run a refetch to get the second result
-                  // which is an error.
-                  expect(result.data.allPeople).toEqual(data.allPeople);
-                  setTimeout(() => {
-                    result.refetch().then(() => {
-                      fail("Expected error value on first refetch.");
-                    }, noop);
-                  }, 0);
-                  break;
-                case 2:
-                  // Waiting for the second result to load
-                  expect(result.loading).toBe(true);
-                  break;
-                case 3:
-                  setTimeout(() => {
-                    result.refetch().catch(() => {
-                      fail("Expected good data on second refetch.");
-                    });
-                  }, 0);
-                  // fallthrough
-                  // The error arrived, run a refetch to get the third result
-                  // which should now contain valid data.
-                  expect(result.loading).toBe(false);
-                  expect(result.error).toBeTruthy();
-                  break;
-                case 4:
-                  expect(result.loading).toBe(true);
-                  expect(result.error).toBeFalsy();
-                  break;
-                case 5:
-                  expect(result.loading).toBe(false);
-                  expect(result.error).toBeFalsy();
-                  expect(result.data.allPeople).toEqual(dataTwo.allPeople);
-                  break;
-                default:
-                  throw new Error("Unexpected fall through");
-              }
-            } catch (e) {
-              // if we throw the error inside the component,
-              // we will get more rerenders in the test, but the `expect` error
-              // might not propagate anyways
-              testFailures.push(e);
-            }
+          {(r: any) => {
+            replaceSnapshot(r);
             return null;
           }}
         </AllPeopleQuery2>
       );
     }
 
-    render(
+    using _disabledAct = disableActEnvironment();
+    const { takeRender, replaceSnapshot, render } =
+      createRenderStream<QueryResult>();
+    await render(
       <ApolloProvider client={client}>
         <Container />
       </ApolloProvider>
     );
 
-    await waitFor(() => {
-      if (testFailures.length > 0) {
-        throw testFailures[0];
-      }
-      expect(count).toBe(6);
-    });
+    {
+      const { snapshot } = await takeRender();
+      expect(snapshot.loading).toBe(true);
+    }
+
+    {
+      const { snapshot } = await takeRender();
+      expect(snapshot.loading).toBe(false);
+      expect(snapshot.data.allPeople).toEqual(data.allPeople);
+      // First result is loaded, run a refetch to get the second result
+      // which is an error.
+      snapshot.refetch().then(() => {
+        fail("Expected error value on first refetch.");
+      }, noop);
+    }
+
+    {
+      const { snapshot } = await takeRender();
+      // Waiting for the second result to load
+      expect(snapshot.loading).toBe(true);
+    }
+
+    {
+      const { snapshot } = await takeRender();
+      expect(snapshot.loading).toBe(false);
+      expect(snapshot.error).toBeTruthy();
+      // The error arrived, run a refetch to get the third result
+      // which should now contain valid data.
+      snapshot.refetch().catch(() => {
+        fail("Expected good data on second refetch.");
+      });
+    }
+
+    {
+      const { snapshot } = await takeRender();
+      expect(snapshot.loading).toBe(true);
+      expect(snapshot.error).toBeFalsy();
+    }
+
+    {
+      const { snapshot } = await takeRender();
+      expect(snapshot.loading).toBe(false);
+      expect(snapshot.error).toBeFalsy();
+      expect(snapshot.data.allPeople).toEqual(dataTwo.allPeople);
+    }
   });
 
   itAsync(

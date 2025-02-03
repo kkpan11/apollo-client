@@ -1,14 +1,11 @@
-import * as React from "react";
+import * as React from "rehackt";
+import type * as ReactTypes from "react";
 import type { DocumentNode } from "graphql";
 import hoistNonReactStatics from "hoist-non-react-statics";
 
 import { parser } from "../parser/index.js";
 import type { DefaultContext, OperationVariables } from "../../core/types.js";
-import type {
-  BaseMutationOptions,
-  MutationFunction,
-  MutationResult,
-} from "../types/types.js";
+import type { BaseMutationOptions } from "../types/types.js";
 import { Mutation } from "../components/index.js";
 
 import {
@@ -20,6 +17,11 @@ import {
 import type { OperationOption, OptionProps, MutateProps } from "./types.js";
 import type { ApolloCache } from "../../core/index.js";
 
+/**
+ * @deprecated
+ * Official support for React Apollo higher order components ended in March 2020.
+ * This library is still included in the `@apollo/client` package, but it no longer receives feature updates or bug fixes.
+ */
 export function withMutation<
   TProps extends TGraphQLVariables | {} = {},
   TData extends Record<string, any> = {},
@@ -56,8 +58,8 @@ export function withMutation<
       >;
 
   return (
-    WrappedComponent: React.ComponentType<TProps & TChildProps>
-  ): React.ComponentClass<TProps> => {
+    WrappedComponent: ReactTypes.ComponentType<TProps & TChildProps>
+  ): ReactTypes.ComponentClass<TProps> => {
     const graphQLDisplayName = `${alias}(${getDisplayName(WrappedComponent)})`;
     class GraphQL extends GraphQLBase<TProps, TChildProps> {
       static displayName = graphQLDisplayName;
@@ -85,20 +87,19 @@ export function withMutation<
         }
 
         return (
+          // @ts-expect-error
           <Mutation ignoreResults {...opts} mutation={document}>
-            {(
-              mutate: MutationFunction<TData, TGraphQLVariables>,
-              { data, ...r }: MutationResult<TData>
-            ) => {
+            {(mutate, { data, ...r }) => {
               // the HOC's historically hoisted the data from the execution result
               // up onto the result since it was passed as a nested prop
               // we massage the Mutation component's shape here to replicate that
               // this matches the query HoC
+
+              // @ts-ignore Type instantiation is excessively deep and possibly infinite.
               const result = Object.assign(r, data || {});
               const name = operationOptions.name || "mutate";
-              const resultName = operationOptions.name
-                ? `${name}Result`
-                : "result";
+              const resultName =
+                operationOptions.name ? `${name}Result` : "result";
               let childProps = {
                 [name]: mutate,
                 [resultName]: result,

@@ -17,10 +17,10 @@ Array [
   "NetworkStatus",
   "Observable",
   "ObservableQuery",
-  "SuspenseCache",
   "checkFetcher",
   "concat",
   "createHttpLink",
+  "createQueryPreloader",
   "createSignalIfSupported",
   "defaultDataIdFromObject",
   "defaultPrinter",
@@ -60,8 +60,10 @@ Array [
   "useBackgroundQuery",
   "useFragment",
   "useLazyQuery",
+  "useLoadableQuery",
   "useMutation",
   "useQuery",
+  "useQueryRefHandlers",
   "useReactiveVar",
   "useReadQuery",
   "useSubscription",
@@ -143,6 +145,7 @@ Array [
   "loadDevMessages",
   "loadErrorMessageHandler",
   "loadErrorMessages",
+  "setErrorMessageHandler",
 ]
 `;
 
@@ -211,7 +214,6 @@ Array [
 
 exports[`exports of public entry points @apollo/client/link/persisted-queries 1`] = `
 Array [
-  "PersistedQueryLink",
   "VERSION",
   "createPersistedQueryLink",
 ]
@@ -261,12 +263,20 @@ Array [
 ]
 `;
 
+exports[`exports of public entry points @apollo/client/masking 1`] = `
+Array [
+  "disableWarningsSlot",
+  "maskFragment",
+  "maskOperation",
+]
+`;
+
 exports[`exports of public entry points @apollo/client/react 1`] = `
 Array [
   "ApolloConsumer",
   "ApolloProvider",
   "DocumentType",
-  "SuspenseCache",
+  "createQueryPreloader",
   "getApolloContext",
   "operationName",
   "parser",
@@ -276,8 +286,10 @@ Array [
   "useBackgroundQuery",
   "useFragment",
   "useLazyQuery",
+  "useLoadableQuery",
   "useMutation",
   "useQuery",
+  "useQueryRefHandlers",
   "useReactiveVar",
   "useReadQuery",
   "useSubscription",
@@ -319,12 +331,26 @@ Array [
   "useBackgroundQuery",
   "useFragment",
   "useLazyQuery",
+  "useLoadableQuery",
   "useMutation",
   "useQuery",
+  "useQueryRefHandlers",
   "useReactiveVar",
   "useReadQuery",
   "useSubscription",
   "useSuspenseQuery",
+]
+`;
+
+exports[`exports of public entry points @apollo/client/react/internal 1`] = `
+Array [
+  "InternalQueryReference",
+  "assertWrappedQueryRef",
+  "getSuspenseCache",
+  "getWrappedPromise",
+  "unwrapQueryRef",
+  "updateWrappedQueryRef",
+  "wrapQueryRef",
 ]
 `;
 
@@ -381,23 +407,35 @@ Array [
 ]
 `;
 
+exports[`exports of public entry points @apollo/client/testing/experimental 1`] = `
+Array [
+  "createSchemaFetch",
+  "createTestSchema",
+]
+`;
+
 exports[`exports of public entry points @apollo/client/utilities 1`] = `
 Array [
+  "AutoCleanedStrongCache",
+  "AutoCleanedWeakCache",
   "Concast",
   "DEV",
   "DeepMerger",
   "DocumentTransform",
   "Observable",
+  "addNonReactiveToNamedFragments",
   "addTypenameToDocument",
   "argumentsObjectFromField",
   "asyncMap",
   "buildQueryFromSelectionSet",
+  "cacheSizes",
   "canUseAsyncIteratorSymbol",
   "canUseDOM",
   "canUseLayoutEffect",
   "canUseSymbol",
   "canUseWeakMap",
   "canUseWeakSet",
+  "canonicalStringify",
   "checkDocument",
   "cloneDeep",
   "compact",
@@ -411,6 +449,7 @@ Array [
   "getFragmentDefinition",
   "getFragmentDefinitions",
   "getFragmentFromSelection",
+  "getFragmentMaskMode",
   "getFragmentQueryDocument",
   "getGraphQLErrorsFromResult",
   "getInclusionDirectives",
@@ -432,6 +471,7 @@ Array [
   "isExecutionPatchInitialResult",
   "isExecutionPatchResult",
   "isField",
+  "isFullyUnmaskedOperation",
   "isInlineFragment",
   "isMutationOperation",
   "isNonEmptyArray",
@@ -452,6 +492,7 @@ Array [
   "mergeOptions",
   "offsetLimitPagination",
   "omitDeep",
+  "preventUnhandledRejection",
   "print",
   "relayStylePagination",
   "removeArgumentsFromDocument",
@@ -478,5 +519,11 @@ Array [
   "invariant",
   "maybe",
   "newInvariantError",
+]
+`;
+
+exports[`exports of public entry points @apollo/client/utilities/subscriptions/urql 1`] = `
+Array [
+  "createFetchMultipartSubscription",
 ]
 `;

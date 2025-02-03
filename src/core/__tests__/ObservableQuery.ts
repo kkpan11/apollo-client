@@ -2,36 +2,43 @@ import gql from "graphql-tag";
 import { GraphQLError } from "graphql";
 import { TypedDocumentNode } from "@graphql-typed-document-node/core";
 
-import { 
+import {
   ApolloClient,
   ApolloQueryResult,
   NetworkStatus,
-  WatchQueryFetchPolicy
+  WatchQueryFetchPolicy,
 } from "../../core";
 import { ObservableQuery } from "../ObservableQuery";
 import { QueryManager } from "../QueryManager";
 
-import { DocumentTransform, Observable, removeDirectivesFromDocument } from "../../utilities";
+import {
+  DocumentTransform,
+  Observable,
+  removeDirectivesFromDocument,
+} from "../../utilities";
 import { ApolloLink, FetchResult } from "../../link/core";
-import { InMemoryCache, NormalizedCacheObject } from "../../cache";
+import { InMemoryCache } from "../../cache";
 import { ApolloError } from "../../errors";
 
-import { itAsync, MockLink, mockSingleLink, subscribeAndCount } from "../../testing";
-import mockQueryManager from "../../testing/core/mocking/mockQueryManager";
-import mockWatchQuery from "../../testing/core/mocking/mockWatchQuery";
-import wrap from "../../testing/core/wrap";
+import { MockLink, MockSubscriptionLink, tick, wait } from "../../testing";
 
-import { resetStore } from "./QueryManager";
 import { SubscriptionObserver } from "zen-observable-ts";
 import { waitFor } from "@testing-library/react";
+import { ObservableStream, spyOnConsole } from "../../testing/internal";
 
 export const mockFetchQuery = (queryManager: QueryManager<any>) => {
-  const fetchConcastWithInfo = queryManager['fetchConcastWithInfo'];
-  const fetchQueryByPolicy: QueryManager<any>["fetchQueryByPolicy"] = (queryManager as any)
-    .fetchQueryByPolicy;
+  const fetchConcastWithInfo = queryManager["fetchConcastWithInfo"];
+  const fetchQueryByPolicy: QueryManager<any>["fetchQueryByPolicy"] = (
+    queryManager as any
+  ).fetchQueryByPolicy;
 
-  const mock = <T extends typeof fetchConcastWithInfo | typeof fetchQueryByPolicy>(original: T) =>
-    jest.fn<ReturnType<T>, Parameters<T>>(function () {
+  const mock = <
+    T extends typeof fetchConcastWithInfo | typeof fetchQueryByPolicy,
+  >(
+    original: T
+  ) =>
+    jest.fn<ReturnType<T>, Parameters<T>>(function (): ReturnType<T> {
+      // @ts-expect-error
       return original.apply(queryManager, arguments);
     });
 
@@ -71,124 +78,148 @@ describe("ObservableQuery", () => {
     },
   };
 
-  const error = new GraphQLError("is offline.", undefined, null, null, ["people_one"]);
-
-  const createQueryManager = ({ link }: { link: ApolloLink }) => {
-    return new QueryManager({
-      link,
-      assumeImmutableResults: true,
-      cache: new InMemoryCache({
-        addTypename: false,
-      }),
-    });
-  };
+  const error = new GraphQLError("is offline.", undefined, null, null, [
+    "people_one",
+  ]);
+  const wrappedError = new ApolloError({
+    graphQLErrors: [error],
+  });
 
   describe("setOptions", () => {
     describe("to change pollInterval", () => {
-      itAsync("starts polling if goes from 0 -> something", (resolve, reject) => {
-        const manager = mockQueryManager(
-          {
-            request: { query, variables },
-            result: { data: dataOne },
-          },
-          {
-            request: { query, variables },
-            result: { data: dataTwo },
-          },
-          {
-            request: { query, variables },
-            result: { data: dataTwo },
-          }
-        );
+      it("starts polling if goes from 0 -> something", async () => {
+        const client = new ApolloClient({
+          cache: new InMemoryCache({ addTypename: false }),
+          link: new MockLink([
+            {
+              request: { query, variables },
+              result: { data: dataOne },
+            },
+            {
+              request: { query, variables },
+              result: { data: dataTwo },
+            },
+            {
+              request: { query, variables },
+              result: { data: dataTwo },
+            },
+          ]),
+        });
 
-        const observable = manager.watchQuery({
+        const observable = client.watchQuery({
           query,
           variables,
           notifyOnNetworkStatusChange: false,
         });
 
-        subscribeAndCount(reject, observable, (handleCount, result) => {
-          if (handleCount === 1) {
-            expect(result.data).toEqual(dataOne);
-            observable.setOptions({ query, pollInterval: 10 });
-          } else if (handleCount === 2) {
-            expect(result.data).toEqual(dataTwo);
-            observable.stopPolling();
-            resolve();
-          }
+        const stream = new ObservableStream(observable);
+
+        await expect(stream).toEmitApolloQueryResult({
+          data: dataOne,
+          loading: false,
+          networkStatus: NetworkStatus.ready,
         });
+
+        await observable.setOptions({ query, pollInterval: 10 });
+
+        await expect(stream).toEmitApolloQueryResult({
+          data: dataTwo,
+          loading: false,
+          networkStatus: NetworkStatus.ready,
+        });
+
+        observable.stopPolling();
+
+        await expect(stream).not.toEmitAnything();
       });
 
-      itAsync("stops polling if goes from something -> 0", (resolve, reject) => {
-        const manager = mockQueryManager(
-          {
-            request: { query, variables },
-            result: { data: dataOne },
-          },
-          {
-            request: { query, variables },
-            result: { data: dataTwo },
-          },
-          {
-            request: { query, variables },
-            result: { data: dataTwo },
-          }
-        );
+      it("stops polling if goes from something -> 0", async () => {
+        const client = new ApolloClient({
+          cache: new InMemoryCache({ addTypename: false }),
+          link: new MockLink([
+            {
+              request: { query, variables },
+              result: { data: dataOne },
+            },
+            {
+              request: { query, variables },
+              result: { data: dataTwo },
+            },
+            {
+              request: { query, variables },
+              result: { data: dataTwo },
+            },
+          ]),
+        });
 
-        const observable = manager.watchQuery({
+        const observable = client.watchQuery({
           query,
           variables,
           pollInterval: 10,
         });
 
-        subscribeAndCount(reject, observable, (handleCount, result) => {
-          if (handleCount === 1) {
-            expect(result.data).toEqual(dataOne);
-            observable.setOptions({ query, pollInterval: 0 });
-            setTimeout(resolve, 5);
-          } else if (handleCount === 2) {
-            reject(new Error("Should not get more than one result"));
-          }
+        const stream = new ObservableStream(observable);
+
+        await expect(stream).toEmitApolloQueryResult({
+          data: dataOne,
+          loading: false,
+          networkStatus: NetworkStatus.ready,
         });
+
+        await observable.setOptions({ query, pollInterval: 0 });
+
+        await expect(stream).not.toEmitAnything();
       });
 
-      itAsync("can change from x>0 to y>0", (resolve, reject) => {
-        const manager = mockQueryManager(
-          {
-            request: { query, variables },
-            result: { data: dataOne },
-          },
-          {
-            request: { query, variables },
-            result: { data: dataTwo },
-          },
-          {
-            request: { query, variables },
-            result: { data: dataTwo },
-          }
-        );
+      it("can change from x>0 to y>0", async () => {
+        const client = new ApolloClient({
+          cache: new InMemoryCache({ addTypename: false }),
+          link: new MockLink([
+            {
+              request: { query, variables },
+              result: { data: dataOne },
+            },
+            {
+              request: { query, variables },
+              result: { data: dataTwo },
+            },
+            {
+              request: { query, variables },
+              result: { data: dataTwo },
+            },
+          ]),
+        });
 
-        const observable = manager.watchQuery({
+        const observable = client.watchQuery({
           query,
           variables,
           pollInterval: 100,
           notifyOnNetworkStatusChange: false,
         });
 
-        subscribeAndCount(reject, observable, (handleCount, result) => {
-          if (handleCount === 1) {
-            expect(result.data).toEqual(dataOne);
-            observable.setOptions({ query, pollInterval: 10 });
-          } else if (handleCount === 2) {
-            expect(result.data).toEqual(dataTwo);
-            observable.stopPolling();
-            resolve();
-          }
+        const stream = new ObservableStream(observable);
+
+        await expect(stream).toEmitApolloQueryResult({
+          data: dataOne,
+          loading: false,
+          networkStatus: NetworkStatus.ready,
         });
+
+        await observable.setOptions({ query, pollInterval: 10 });
+
+        await expect(stream).toEmitApolloQueryResult({
+          data: dataTwo,
+          loading: false,
+          networkStatus: NetworkStatus.ready,
+        });
+
+        observable.stopPolling();
+
+        await expect(stream).not.toEmitAnything();
       });
     });
 
-    itAsync("does not break refetch", (resolve, reject) => {
+    it("does not break refetch", async () => {
       // This query and variables are copied from react-apollo
       const queryWithVars = gql`
         query people($first: Int) {
@@ -206,46 +237,60 @@ describe("ObservableQuery", () => {
       const data2 = { allPeople: { people: [{ name: "Leia Skywalker" }] } };
       const variables2 = { first: 1 };
 
-      const queryManager = mockQueryManager(
-        {
-          request: {
-            query: queryWithVars,
-            variables: variables1,
+      const client = new ApolloClient({
+        cache: new InMemoryCache({ addTypename: false }),
+        link: new MockLink([
+          {
+            request: {
+              query: queryWithVars,
+              variables: variables1,
+            },
+            result: { data },
           },
-          result: { data },
-        },
-        {
-          request: {
-            query: queryWithVars,
-            variables: variables2,
+          {
+            request: {
+              query: queryWithVars,
+              variables: variables2,
+            },
+            result: { data: data2 },
           },
-          result: { data: data2 },
-        }
-      );
+        ]),
+      });
 
-      const observable = queryManager.watchQuery({
+      const observable = client.watchQuery({
         query: queryWithVars,
         variables: variables1,
         notifyOnNetworkStatusChange: true,
       });
 
-      subscribeAndCount(reject, observable, (handleCount, result) => {
-        if (handleCount === 1) {
-          expect(result.data).toEqual(data);
-          expect(result.loading).toBe(false);
-          return observable.refetch(variables2);
-        } else if (handleCount === 2) {
-          expect(result.loading).toBe(true);
-          expect(result.networkStatus).toBe(NetworkStatus.setVariables);
-        } else if (handleCount === 3) {
-          expect(result.loading).toBe(false);
-          expect(result.data).toEqual(data2);
-          resolve();
-        }
+      const stream = new ObservableStream(observable);
+
+      await expect(stream).toEmitApolloQueryResult({
+        data,
+        loading: false,
+        networkStatus: NetworkStatus.ready,
       });
+
+      await observable.refetch(variables2);
+
+      await expect(stream).toEmitApolloQueryResult({
+        // TODO: Ensure this value is undefined instead of an empty object
+        data: {},
+        loading: true,
+        networkStatus: NetworkStatus.setVariables,
+        partial: true,
+      });
+
+      await expect(stream).toEmitApolloQueryResult({
+        data: data2,
+        loading: false,
+        networkStatus: NetworkStatus.ready,
+      });
+
+      await expect(stream).not.toEmitAnything();
     });
 
-    itAsync("rerenders when refetch is called", (resolve, reject) => {
+    it("rerenders when refetch is called", async () => {
       // This query and variables are copied from react-apollo
       const query = gql`
         query people($first: Int) {
@@ -262,66 +307,9 @@ describe("ObservableQuery", () => {
 
       const data2 = { allPeople: { people: [{ name: "Leia Skywalker" }] } };
 
-      const queryManager = mockQueryManager(
-        {
-          request: {
-            query,
-            variables,
-          },
-          result: { data },
-        },
-        {
-          request: {
-            query,
-            variables,
-          },
-          result: { data: data2 },
-        }
-      );
-
-      const observable = queryManager.watchQuery({
-        query,
-        variables,
-        notifyOnNetworkStatusChange: true,
-      });
-
-      subscribeAndCount(reject, observable, (handleCount, result) => {
-        if (handleCount === 1) {
-          expect(result.loading).toEqual(false);
-          expect(result.data).toEqual(data);
-          return observable.refetch();
-        } else if (handleCount === 2) {
-          expect(result.loading).toEqual(true);
-          expect(result.networkStatus).toEqual(NetworkStatus.refetch);
-        } else if (handleCount === 3) {
-          expect(result.loading).toEqual(false);
-          expect(result.data).toEqual(data2);
-          resolve();
-        }
-      });
-    });
-
-    itAsync(
-      "rerenders with new variables then shows correct data for previous variables",
-      (resolve, reject) => {
-        // This query and variables are copied from react-apollo
-        const query = gql`
-          query people($first: Int) {
-            allPeople(first: $first) {
-              people {
-                name
-              }
-            }
-          }
-        `;
-
-        const data = { allPeople: { people: [{ name: "Luke Skywalker" }] } };
-        const variables = { first: 0 };
-
-        const data2 = { allPeople: { people: [{ name: "Leia Skywalker" }] } };
-        const variables2 = { first: 1 };
-
-        const observable: ObservableQuery<any> = mockWatchQuery(
+      const client = new ApolloClient({
+        cache: new InMemoryCache({ addTypename: false }),
+        link: new MockLink([
           {
             request: {
               query,
@@ -332,41 +320,123 @@ describe("ObservableQuery", () => {
           {
             request: {
               query,
-              variables: variables2,
+              variables,
             },
             result: { data: data2 },
-          }
-        );
+          },
+        ]),
+      });
 
-        subscribeAndCount(reject, observable, async (handleCount, result) => {
-          if (handleCount === 1) {
-            expect(result.data).toEqual(data);
-            expect(result.loading).toBe(false);
-            await observable.setOptions({
-              variables: variables2,
-              notifyOnNetworkStatusChange: true,
-            });
-          } else if (handleCount === 2) {
-            expect(result.loading).toBe(true);
-            expect(result.networkStatus).toBe(NetworkStatus.setVariables);
-          } else if (handleCount === 3) {
-            expect(result.loading).toBe(false);
-            expect(result.data).toEqual(data2);
-            // go back to first set of variables
-            const current = await observable.reobserve({ variables });
-            expect(current.data).toEqual(data);
-            resolve();
-          }
-        });
-      }
-    );
+      const observable = client.watchQuery({
+        query,
+        variables,
+        notifyOnNetworkStatusChange: true,
+      });
 
-    // TODO: Something isn't quite right with this test. It's failing but not
-    // for the right reasons.
-    itAsync.skip(
-      "if query is refetched, and an error is returned, no other observer callbacks will be called",
-      (resolve) => {
-        const observable: ObservableQuery<any> = mockWatchQuery(
+      const stream = new ObservableStream(observable);
+
+      await expect(stream).toEmitApolloQueryResult({
+        data,
+        loading: false,
+        networkStatus: NetworkStatus.ready,
+      });
+
+      await observable.refetch();
+
+      await expect(stream).toEmitApolloQueryResult({
+        data,
+        loading: true,
+        networkStatus: NetworkStatus.refetch,
+      });
+
+      await expect(stream).toEmitApolloQueryResult({
+        data: data2,
+        loading: false,
+        networkStatus: NetworkStatus.ready,
+      });
+
+      await expect(stream).not.toEmitAnything();
+    });
+
+    it("rerenders with new variables then shows correct data for previous variables", async () => {
+      // This query and variables are copied from react-apollo
+      const query = gql`
+        query people($first: Int) {
+          allPeople(first: $first) {
+            people {
+              name
+            }
+          }
+        }
+      `;
+
+      const data = { allPeople: { people: [{ name: "Luke Skywalker" }] } };
+      const variables = { first: 0 };
+
+      const data2 = { allPeople: { people: [{ name: "Leia Skywalker" }] } };
+      const variables2 = { first: 1 };
+
+      const client = new ApolloClient({
+        cache: new InMemoryCache({ addTypename: false }),
+        link: new MockLink([
+          {
+            request: { query, variables },
+            result: { data },
+          },
+          {
+            request: { query, variables: variables2 },
+            result: { data: data2 },
+          },
+        ]),
+      });
+      const observable = client.watchQuery({ query, variables });
+      const stream = new ObservableStream(observable);
+
+      await expect(stream).toEmitApolloQueryResult({
+        data,
+        loading: false,
+        networkStatus: NetworkStatus.ready,
+      });
+
+      await observable.setOptions({
+        variables: variables2,
+        notifyOnNetworkStatusChange: true,
+      });
+
+      await expect(stream).toEmitApolloQueryResult({
+        data: {},
+        loading: true,
+        networkStatus: NetworkStatus.setVariables,
+        partial: true,
+      });
+
+      await expect(stream).toEmitApolloQueryResult({
+        data: data2,
+        loading: false,
+        networkStatus: NetworkStatus.ready,
+      });
+
+      // go back to first set of variables
+      const current = await observable.reobserve({ variables });
+      expect(current).toEqualApolloQueryResult({
+        data,
+        loading: false,
+        networkStatus: NetworkStatus.ready,
+      });
+
+      await expect(stream).toEmitApolloQueryResult({
+        data,
+        loading: false,
+        networkStatus: NetworkStatus.ready,
+      });
+
+      await expect(stream).not.toEmitAnything();
+    });
+
+    it("if query is refetched, and an error is returned, no other observer callbacks will be called", async () => {
+      const client = new ApolloClient({
+        cache: new InMemoryCache({ addTypename: false }),
+        link: new MockLink([
           {
             request: { query, variables },
             result: { data: dataOne },
@@ -378,108 +448,131 @@ describe("ObservableQuery", () => {
           {
             request: { query, variables },
             result: { data: dataOne },
-          }
-        );
-
-        let handleCount = 0;
-        observable.subscribe({
-          next: (result) => {
-            handleCount++;
-            if (handleCount === 1) {
-              expect(result.data).toEqual(dataOne);
-              observable.refetch();
-            } else if (handleCount === 3) {
-              throw new Error("next shouldn't fire after an error");
-            }
           },
-          error: () => {
-            handleCount++;
-            expect(handleCount).toBe(2);
-            observable.refetch();
-            setTimeout(resolve, 25);
-          },
-        });
-      }
-    );
+        ]),
+      });
+      const observable = client.watchQuery({ query, variables });
+      const stream = new ObservableStream(observable);
 
-    itAsync("does a network request if fetchPolicy becomes networkOnly", (resolve, reject) => {
-      const observable: ObservableQuery<any> = mockWatchQuery(
-        {
-          request: { query, variables },
-          result: { data: dataOne },
-        },
-        {
-          request: { query, variables },
-          result: { data: dataTwo },
-        }
+      await expect(stream).toEmitApolloQueryResult({
+        data: dataOne,
+        loading: false,
+        networkStatus: NetworkStatus.ready,
+      });
+
+      await expect(observable.refetch()).rejects.toThrow(
+        new ApolloError({ graphQLErrors: [error] })
       );
 
-      subscribeAndCount(reject, observable, (handleCount, result) => {
-        if (handleCount === 1) {
-          expect(result.loading).toBe(false);
-          expect(result.data).toEqual(dataOne);
-          return observable.setOptions({ fetchPolicy: "network-only" });
-        } else if (handleCount === 2) {
-          expect(result.loading).toBe(false);
-          expect(result.data).toEqual(dataTwo);
-          resolve();
-        }
+      await expect(stream).toEmitError(
+        new ApolloError({ graphQLErrors: [error] })
+      );
+
+      await expect(observable.refetch()).resolves.toEqualApolloQueryResult({
+        data: dataOne,
+        loading: false,
+        networkStatus: NetworkStatus.ready,
       });
+
+      await expect(stream).not.toEmitAnything();
     });
 
-    itAsync(
-      "does a network request if fetchPolicy is cache-only then store is reset then fetchPolicy becomes not cache-only",
-      (resolve, reject) => {
-        const testQuery = gql`
-          query {
-            author {
-              firstName
-              lastName
-            }
-          }
-        `;
-        const data = {
-          author: {
-            firstName: "John",
-            lastName: "Smith",
+    it("does a network request if fetchPolicy becomes networkOnly", async () => {
+      const client = new ApolloClient({
+        cache: new InMemoryCache({ addTypename: false }),
+        link: new MockLink([
+          {
+            request: { query, variables },
+            result: { data: dataOne },
           },
-        };
+          {
+            request: { query, variables },
+            result: { data: dataTwo },
+          },
+        ]),
+      });
 
-        let timesFired = 0;
-        const link: ApolloLink = ApolloLink.from([
-          () =>
-            new Observable((observer) => {
-              timesFired += 1;
-              observer.next({ data });
-              observer.complete();
-            }),
-        ]);
+      const observable = client.watchQuery({ query, variables });
+      const stream = new ObservableStream(observable);
 
-        const queryManager = createQueryManager({ link });
-        // fetch first data from server
-        const observable = queryManager.watchQuery({
-          query: testQuery,
-        });
+      await expect(stream).toEmitApolloQueryResult({
+        data: dataOne,
+        loading: false,
+        networkStatus: NetworkStatus.ready,
+      });
 
-        subscribeAndCount(reject, observable, async (handleCount, result) => {
-          if (handleCount === 1) {
-            expect(result.data).toEqual(data);
-            expect(timesFired).toBe(1);
-            // set policy to be cache-only but data is found
-            await observable.setOptions({ fetchPolicy: "cache-only" });
-            await resetStore(queryManager);
-          } else if (handleCount === 2) {
-            expect(result.data).toEqual({});
-            expect(result.loading).toBe(false);
-            expect(result.networkStatus).toBe(NetworkStatus.ready);
-            expect(timesFired).toBe(1);
-            resolve();
+      await observable.setOptions({ fetchPolicy: "network-only" });
+
+      await expect(stream).toEmitApolloQueryResult({
+        data: dataTwo,
+        loading: false,
+        networkStatus: NetworkStatus.ready,
+      });
+
+      await expect(stream).not.toEmitAnything();
+    });
+
+    it("does a network request if fetchPolicy is cache-only then store is reset then fetchPolicy becomes not cache-only", async () => {
+      const testQuery = gql`
+        query {
+          author {
+            firstName
+            lastName
           }
-        });
-      }
-    );
+        }
+      `;
+      const data = {
+        author: {
+          firstName: "John",
+          lastName: "Smith",
+        },
+      };
 
-    itAsync("does a network request if fetchPolicy changes from cache-only", (resolve, reject) => {
+      let timesFired = 0;
+      const link: ApolloLink = ApolloLink.from([
+        () =>
+          new Observable((observer) => {
+            timesFired += 1;
+            observer.next({ data });
+            observer.complete();
+          }),
+      ]);
+
+      const client = new ApolloClient({
+        cache: new InMemoryCache({ addTypename: false }),
+        link,
+      });
+      // fetch first data from server
+      const observable = client.watchQuery({
+        query: testQuery,
+      });
+
+      const stream = new ObservableStream(observable);
+
+      await expect(stream).toEmitApolloQueryResult({
+        data,
+        loading: false,
+        networkStatus: NetworkStatus.ready,
+      });
+
+      expect(timesFired).toBe(1);
+
+      await observable.setOptions({ fetchPolicy: "cache-only" });
+      await client.resetStore();
+
+      await expect(stream).toEmitApolloQueryResult({
+        data: {},
+        loading: false,
+        networkStatus: NetworkStatus.ready,
+        partial: true,
+      });
+
+      expect(timesFired).toBe(1);
+
+      await expect(stream).not.toEmitAnything();
+    });
+
+    it("does a network request if fetchPolicy changes from cache-only", async () => {
       const testQuery = gql`
         query {
           author {
@@ -506,32 +599,39 @@ describe("ObservableQuery", () => {
         },
       ]);
 
-      const queryManager = createQueryManager({ link });
+      const client = new ApolloClient({
+        cache: new InMemoryCache({ addTypename: false }),
+        link,
+      });
 
-      const observable = queryManager.watchQuery({
+      const observable = client.watchQuery({
         query: testQuery,
         fetchPolicy: "cache-only",
         notifyOnNetworkStatusChange: false,
       });
 
-      subscribeAndCount(reject, observable, (handleCount, result) => {
-        if (handleCount === 1) {
-          expect(result.loading).toBe(false);
-          expect(result.data).toEqual({});
-          expect(timesFired).toBe(0);
-          observable.setOptions({ fetchPolicy: "cache-first" });
-        } else if (handleCount === 2) {
-          expect(result.loading).toBe(false);
-          expect(result.data).toEqual(data);
-          expect(timesFired).toBe(1);
-          resolve();
-        }
+      const stream = new ObservableStream(observable);
+
+      await expect(stream).toEmitApolloQueryResult({
+        data: {},
+        loading: false,
+        networkStatus: NetworkStatus.ready,
+        partial: true,
       });
+      expect(timesFired).toBe(0);
+
+      await observable.setOptions({ fetchPolicy: "cache-first" });
+
+      await expect(stream).toEmitApolloQueryResult({
+        data,
+        loading: false,
+        networkStatus: NetworkStatus.ready,
+      });
+      expect(timesFired).toBe(1);
+      await expect(stream).not.toEmitAnything();
     });
 
-    itAsync("can set queries to standby and will not fetch when doing so", (resolve, reject) => {
-      let queryManager: QueryManager<NormalizedCacheObject>;
-      let observable: ObservableQuery<any>;
+    it("can set queries to standby and will not fetch when doing so", async () => {
       const testQuery = gql`
         query {
           author {
@@ -558,30 +658,33 @@ describe("ObservableQuery", () => {
           });
         },
       ]);
-      queryManager = createQueryManager({ link });
-      observable = queryManager.watchQuery({
+      const client = new ApolloClient({
+        cache: new InMemoryCache({ addTypename: false }),
+        link,
+      });
+      const observable = client.watchQuery({
         query: testQuery,
         fetchPolicy: "cache-first",
         notifyOnNetworkStatusChange: false,
       });
 
-      subscribeAndCount(reject, observable, async (handleCount, result) => {
-        if (handleCount === 1) {
-          expect(result.data).toEqual(data);
-          expect(timesFired).toBe(1);
-          await observable.setOptions({ query, fetchPolicy: "standby" });
-          // make sure the query didn't get fired again.
-          expect(timesFired).toBe(1);
-          resolve();
-        } else if (handleCount === 2) {
-          throw new Error("Handle should not be triggered on standby query");
-        }
+      const stream = new ObservableStream(observable);
+
+      await expect(stream).toEmitApolloQueryResult({
+        data,
+        loading: false,
+        networkStatus: NetworkStatus.ready,
       });
+      expect(timesFired).toBe(1);
+
+      await observable.setOptions({ query, fetchPolicy: "standby" });
+
+      // make sure the query didn't get fired again.
+      await expect(stream).not.toEmitAnything();
+      expect(timesFired).toBe(1);
     });
 
-    itAsync("will not fetch when setting a cache-only query to standby", (resolve, reject) => {
-      let queryManager: QueryManager<NormalizedCacheObject>;
-      let observable: ObservableQuery<any>;
+    it("will not fetch when setting a cache-only query to standby", async () => {
       const testQuery = gql`
         query {
           author {
@@ -608,119 +711,182 @@ describe("ObservableQuery", () => {
           });
         },
       ]);
-      queryManager = createQueryManager({ link });
-
-      queryManager.query({ query: testQuery }).then(() => {
-        observable = queryManager.watchQuery({
-          query: testQuery,
-          fetchPolicy: "cache-first",
-          notifyOnNetworkStatusChange: false,
-        });
-
-        subscribeAndCount(reject, observable, async (handleCount, result) => {
-          if (handleCount === 1) {
-            expect(result.data).toEqual(data);
-            expect(timesFired).toBe(1);
-            await observable.setOptions({ query, fetchPolicy: "standby" });
-            // make sure the query didn't get fired again.
-            expect(timesFired).toBe(1);
-            resolve();
-          } else if (handleCount === 2) {
-            throw new Error("Handle should not be triggered on standby query");
-          }
-        });
+      const client = new ApolloClient({
+        cache: new InMemoryCache({ addTypename: false }),
+        link,
       });
+
+      await client.query({ query: testQuery });
+
+      const observable = client.watchQuery({
+        query: testQuery,
+        fetchPolicy: "cache-only",
+        notifyOnNetworkStatusChange: false,
+      });
+
+      const stream = new ObservableStream(observable);
+
+      await expect(stream).toEmitApolloQueryResult({
+        data,
+        loading: false,
+        networkStatus: NetworkStatus.ready,
+      });
+
+      expect(timesFired).toBe(1);
+
+      await observable.setOptions({ query, fetchPolicy: "standby" });
+
+      // make sure the query didn't get fired again.
+      await expect(stream).not.toEmitAnything();
+      expect(timesFired).toBe(1);
     });
 
-    itAsync("returns a promise which eventually returns data", (resolve, reject) => {
-      const observable: ObservableQuery<any> = mockWatchQuery(
-        {
-          request: { query, variables },
-          result: { data: dataOne },
-        },
-        {
-          request: { query, variables },
-          result: { data: dataTwo },
-        }
-      );
-
-      subscribeAndCount(reject, observable, (handleCount, result) => {
-        if (handleCount === 1) {
-          expect(result.data).toEqual(dataOne);
-          observable
-            .setOptions({
-              fetchPolicy: "cache-and-network",
-            })
-            .then((res) => {
-              expect(res.data).toEqual(dataTwo);
-            })
-            .then(resolve, reject);
-        }
+    it("returns a promise which eventually returns data", async () => {
+      const client = new ApolloClient({
+        cache: new InMemoryCache({ addTypename: false }),
+        link: new MockLink([
+          {
+            request: { query, variables },
+            result: { data: dataOne },
+          },
+          {
+            request: { query, variables },
+            result: { data: dataTwo },
+          },
+        ]),
       });
+      const observable = client.watchQuery({ query, variables });
+      const stream = new ObservableStream(observable);
+
+      await expect(stream).toEmitApolloQueryResult({
+        data: dataOne,
+        loading: false,
+        networkStatus: NetworkStatus.ready,
+      });
+
+      const res = await observable.setOptions({
+        fetchPolicy: "cache-and-network",
+      });
+
+      expect(res).toEqualApolloQueryResult({
+        data: dataTwo,
+        loading: false,
+        networkStatus: NetworkStatus.ready,
+      });
+
+      await expect(stream).toEmitApolloQueryResult({
+        data: dataOne,
+        loading: true,
+        networkStatus: NetworkStatus.loading,
+      });
+
+      await expect(stream).toEmitApolloQueryResult({
+        data: dataTwo,
+        loading: false,
+        networkStatus: NetworkStatus.ready,
+      });
+
+      await expect(stream).not.toEmitAnything();
     });
   });
 
   describe("setVariables", () => {
-    itAsync("reruns query if the variables change", (resolve, reject) => {
-      const queryManager = mockQueryManager(
-        {
-          request: { query, variables },
-          result: { data: dataOne },
-        },
-        {
-          request: { query, variables: differentVariables },
-          result: { data: dataTwo },
-        }
-      );
+    it("reruns query if the variables change", async () => {
+      const client = new ApolloClient({
+        cache: new InMemoryCache({ addTypename: false }),
+        link: new MockLink([
+          {
+            request: { query, variables },
+            result: { data: dataOne },
+          },
+          {
+            request: { query, variables: differentVariables },
+            result: { data: dataTwo },
+          },
+        ]),
+      });
 
-      const observable = queryManager.watchQuery({
+      const observable = client.watchQuery({
         query,
         variables,
         notifyOnNetworkStatusChange: true,
       });
 
-      subscribeAndCount(reject, observable, (handleCount, result) => {
-        if (handleCount === 1) {
-          expect(result.loading).toBe(false);
-          expect(result.data).toEqual(dataOne);
-          return observable.setVariables(differentVariables);
-        } else if (handleCount === 2) {
-          expect(result.loading).toBe(true);
-          expect(result.networkStatus).toBe(NetworkStatus.setVariables);
-        } else if (handleCount === 3) {
-          expect(result.loading).toBe(false);
-          expect(result.data).toEqual(dataTwo);
-          resolve();
-        }
+      const stream = new ObservableStream(observable);
+
+      await expect(stream).toEmitApolloQueryResult({
+        data: dataOne,
+        loading: false,
+        networkStatus: NetworkStatus.ready,
       });
+
+      await observable.setVariables(differentVariables);
+
+      await expect(stream).toEmitApolloQueryResult({
+        // TODO: Fix this error
+        // @ts-expect-error `ApolloQueryResult` needs to be updated to allow for `undefined` and this value needs to emit undefined instead of empty object
+        data: {},
+        loading: true,
+        networkStatus: NetworkStatus.setVariables,
+        partial: true,
+      });
+
+      await expect(stream).toEmitApolloQueryResult({
+        data: dataTwo,
+        loading: false,
+        networkStatus: NetworkStatus.ready,
+      });
+
+      await expect(stream).not.toEmitAnything();
     });
 
-    itAsync("does invalidate the currentResult data if the variables change", (resolve, reject) => {
-      const observable: ObservableQuery<any> = mockWatchQuery(
-        {
-          request: { query, variables },
-          result: { data: dataOne },
-        },
-        {
-          request: { query, variables: differentVariables },
-          result: { data: dataTwo },
-          delay: 25,
-        }
-      );
-
-      subscribeAndCount(reject, observable, async (handleCount, result) => {
-        if (handleCount === 1) {
-          expect(result.data).toEqual(dataOne);
-          expect(observable.getCurrentResult().data).toEqual(dataOne);
-          await observable.setVariables(differentVariables);
-        }
-        expect(observable.getCurrentResult().data).toEqual(dataTwo);
-        expect(observable.getCurrentResult().loading).toBe(false);
-        resolve();
+    it("does invalidate the currentResult data if the variables change", async () => {
+      const client = new ApolloClient({
+        cache: new InMemoryCache({ addTypename: false }),
+        link: new MockLink([
+          {
+            request: { query, variables },
+            result: { data: dataOne },
+          },
+          {
+            request: { query, variables: differentVariables },
+            result: { data: dataTwo },
+            delay: 25,
+          },
+        ]),
       });
+      const observable = client.watchQuery({ query, variables });
+      const stream = new ObservableStream(observable);
+
+      await expect(stream).toEmitApolloQueryResult({
+        data: dataOne,
+        loading: false,
+        networkStatus: NetworkStatus.ready,
+      });
+      expect(observable.getCurrentResult()).toEqualApolloQueryResult({
+        data: dataOne,
+        loading: false,
+        networkStatus: NetworkStatus.ready,
+      });
+
+      await observable.setVariables(differentVariables);
+
+      await expect(stream).toEmitApolloQueryResult({
+        data: dataTwo,
+        loading: false,
+        networkStatus: NetworkStatus.ready,
+      });
+      expect(observable.getCurrentResult()).toEqualApolloQueryResult({
+        data: dataTwo,
+        loading: false,
+        networkStatus: NetworkStatus.ready,
+      });
+
+      await expect(stream).not.toEmitAnything();
     });
 
-    itAsync("does invalidate the currentResult data if the variables change", (resolve, reject) => {
+    // TODO: Determine how this test differs from the previous one
+    it("does invalidate the currentResult data if the variables change", async () => {
       // Standard data for all these tests
       const query = gql`
         query UsersQuery($page: Int) {
@@ -754,34 +920,54 @@ describe("ObservableQuery", () => {
         ],
       };
 
-      const observable: ObservableQuery<any> = mockWatchQuery(
-        {
-          request: { query, variables },
-          result: { data: dataOne },
-        },
-        {
-          request: { query, variables: differentVariables },
-          result: { data: dataTwo },
-          delay: 25,
-        }
-      );
-
-      subscribeAndCount(reject, observable, async (handleCount, result) => {
-        if (handleCount === 1) {
-          expect(result.data).toEqual(dataOne);
-          expect(observable.getCurrentResult().data).toEqual(dataOne);
-          await observable.setVariables(differentVariables);
-        }
-        expect(observable.getCurrentResult().data).toEqual(dataTwo);
-        expect(observable.getCurrentResult().loading).toBe(false);
-        resolve();
+      const client = new ApolloClient({
+        cache: new InMemoryCache({ addTypename: false }),
+        link: new MockLink([
+          {
+            request: { query, variables },
+            result: { data: dataOne },
+          },
+          {
+            request: { query, variables: differentVariables },
+            result: { data: dataTwo },
+            delay: 25,
+          },
+        ]),
       });
+      const observable = client.watchQuery({ query, variables });
+      const stream = new ObservableStream(observable);
+
+      await expect(stream).toEmitApolloQueryResult({
+        data: dataOne,
+        loading: false,
+        networkStatus: NetworkStatus.ready,
+      });
+      expect(observable.getCurrentResult()).toEqualApolloQueryResult({
+        data: dataOne,
+        loading: false,
+        networkStatus: NetworkStatus.ready,
+      });
+
+      await observable.setVariables(differentVariables);
+
+      await expect(stream).toEmitApolloQueryResult({
+        data: dataTwo,
+        loading: false,
+        networkStatus: NetworkStatus.ready,
+      });
+      expect(observable.getCurrentResult()).toEqualApolloQueryResult({
+        data: dataTwo,
+        loading: false,
+        networkStatus: NetworkStatus.ready,
+      });
+
+      await expect(stream).not.toEmitAnything();
     });
 
-    itAsync(
-      "does not invalidate the currentResult errors if the variables change",
-      (resolve, reject) => {
-        const queryManager = mockQueryManager(
+    it("does not invalidate the currentResult errors if the variables change", async () => {
+      const client = new ApolloClient({
+        cache: new InMemoryCache({ addTypename: false }),
+        link: new MockLink([
           {
             request: { query, variables },
             result: { errors: [error] },
@@ -789,39 +975,65 @@ describe("ObservableQuery", () => {
           {
             request: { query, variables: differentVariables },
             result: { data: dataTwo },
-          }
-        );
+          },
+        ]),
+      });
 
-        const observable = queryManager.watchQuery({
-          query,
-          variables,
-          errorPolicy: "all",
-        });
+      const observable = client.watchQuery({
+        query,
+        variables,
+        errorPolicy: "all",
+      });
 
-        subscribeAndCount(reject, observable, (handleCount, result) => {
-          if (handleCount === 1) {
-            expect(result.errors).toEqual([error]);
-            expect(observable.getCurrentResult().errors).toEqual([error]);
-            observable.setVariables(differentVariables);
-            expect(observable.getCurrentResult().errors).toBeUndefined();
-          } else if (handleCount === 2) {
-            expect(result.data).toEqual(dataTwo);
-            expect(observable.getCurrentResult().data).toEqual(dataTwo);
-            expect(observable.getCurrentResult().loading).toBe(false);
-            resolve();
-          }
-        });
-      }
-    );
+      const stream = new ObservableStream(observable);
 
-    itAsync("does not perform a query when unsubscribed if variables change", (resolve, reject) => {
-      // Note: no responses, will throw if a query is made
-      const queryManager = mockQueryManager();
-      const observable = queryManager.watchQuery({ query, variables });
-      return observable.setVariables(differentVariables).then(resolve, reject);
+      await expect(stream).toEmitApolloQueryResult({
+        // TODO: Fix this error
+        // @ts-expect-error Need to update ApolloQueryResult type to allow for undefined
+        data: undefined,
+        errors: [error],
+        loading: false,
+        networkStatus: NetworkStatus.error,
+      });
+      expect(observable.getCurrentResult()).toEqualApolloQueryResult({
+        // TODO: Fix this error
+        // @ts-expect-error Need to update ApolloQueryResult type to allow for undefined
+        data: undefined,
+        errors: [error],
+        loading: false,
+        networkStatus: NetworkStatus.ready,
+        // TODO: This is not present on the emitted result so this should match
+        partial: true,
+      });
+
+      await observable.setVariables(differentVariables);
+
+      await expect(stream).toEmitApolloQueryResult({
+        data: dataTwo,
+        loading: false,
+        networkStatus: NetworkStatus.ready,
+      });
+      expect(observable.getCurrentResult()).toEqualApolloQueryResult({
+        data: dataTwo,
+        loading: false,
+        networkStatus: NetworkStatus.ready,
+      });
+
+      await expect(stream).not.toEmitAnything();
     });
 
-    itAsync("sets networkStatus to `setVariables` when fetching", (resolve, reject) => {
+    it("does not perform a query when unsubscribed if variables change", async () => {
+      // Note: no responses, will throw if a query is made
+      const client = new ApolloClient({
+        cache: new InMemoryCache({ addTypename: false }),
+        link: new MockLink([]),
+      });
+      const observable = client.watchQuery({ query, variables });
+
+      await observable.setVariables(differentVariables);
+    });
+
+    it("sets networkStatus to `setVariables` when fetching", async () => {
       const mockedResponses = [
         {
           request: { query, variables },
@@ -833,245 +1045,351 @@ describe("ObservableQuery", () => {
         },
       ];
 
-      const queryManager = mockQueryManager(...mockedResponses);
+      const client = new ApolloClient({
+        cache: new InMemoryCache({ addTypename: false }),
+        link: new MockLink(mockedResponses),
+      });
       const firstRequest = mockedResponses[0].request;
-      const observable = queryManager.watchQuery({
+      const observable = client.watchQuery({
         query: firstRequest.query,
         variables: firstRequest.variables,
         notifyOnNetworkStatusChange: true,
       });
 
-      subscribeAndCount(reject, observable, (handleCount, result) => {
-        if (handleCount === 1) {
-          expect(result.loading).toBe(false);
-          expect(result.data).toEqual(dataOne);
-          expect(result.networkStatus).toBe(NetworkStatus.ready);
-          observable.setVariables(differentVariables);
-        } else if (handleCount === 2) {
-          expect(result.loading).toBe(true);
-          expect(result.networkStatus).toBe(NetworkStatus.setVariables);
-        } else if (handleCount === 3) {
-          expect(result.loading).toBe(false);
-          expect(result.networkStatus).toBe(NetworkStatus.ready);
-          expect(result.data).toEqual(dataTwo);
-          resolve();
-        }
+      const stream = new ObservableStream(observable);
+
+      await expect(stream).toEmitApolloQueryResult({
+        data: dataOne,
+        loading: false,
+        networkStatus: NetworkStatus.ready,
       });
+
+      await observable.setVariables(differentVariables);
+
+      await expect(stream).toEmitApolloQueryResult({
+        // TODO: Fix this error
+        // @ts-expect-error Ensure ApolloQueryResult allows for undefined and fix this value to match
+        data: {},
+        loading: true,
+        networkStatus: NetworkStatus.setVariables,
+        partial: true,
+      });
+
+      await expect(stream).toEmitApolloQueryResult({
+        data: dataTwo,
+        loading: false,
+        networkStatus: NetworkStatus.ready,
+      });
+
+      await expect(stream).not.toEmitAnything();
     });
 
-    itAsync(
-      "sets networkStatus to `setVariables` when calling refetch with new variables",
-      (resolve, reject) => {
-        const mockedResponses = [
-          {
-            request: { query, variables },
-            result: { data: dataOne },
-          },
-          {
-            request: { query, variables: differentVariables },
-            result: { data: dataTwo },
-          },
-        ];
-
-        const queryManager = mockQueryManager(...mockedResponses);
-        const firstRequest = mockedResponses[0].request;
-        const observable = queryManager.watchQuery({
-          query: firstRequest.query,
-          variables: firstRequest.variables,
-          notifyOnNetworkStatusChange: true,
-        });
-
-        subscribeAndCount(reject, observable, (handleCount, result) => {
-          if (handleCount === 1) {
-            expect(result.loading).toBe(false);
-            expect(result.data).toEqual(dataOne);
-            expect(result.networkStatus).toBe(NetworkStatus.ready);
-            observable.refetch(differentVariables);
-          } else if (handleCount === 2) {
-            expect(result.loading).toBe(true);
-            expect(result.networkStatus).toBe(NetworkStatus.setVariables);
-          } else if (handleCount === 3) {
-            expect(result.loading).toBe(false);
-            expect(result.networkStatus).toBe(NetworkStatus.ready);
-            expect(result.data).toEqual(dataTwo);
-            resolve();
-          }
-        });
-      }
-    );
-
-    itAsync("does not rerun query if variables do not change", (resolve, reject) => {
-      const observable: ObservableQuery<any> = mockWatchQuery(
+    it("sets networkStatus to `setVariables` when calling refetch with new variables", async () => {
+      const mockedResponses = [
         {
           request: { query, variables },
           result: { data: dataOne },
-        },
-        {
-          request: { query, variables },
-          result: { data: dataTwo },
-        }
-      );
-
-      let errored = false;
-      subscribeAndCount(reject, observable, (handleCount, result) => {
-        if (handleCount === 1) {
-          expect(result.data).toEqual(dataOne);
-          observable.setVariables(variables);
-
-          // Nothing should happen, so we'll wait a moment to check that
-          setTimeout(() => !errored && resolve(), 10);
-        } else if (handleCount === 2) {
-          errored = true;
-          throw new Error("Observable callback should not fire twice");
-        }
-      });
-    });
-
-    itAsync("handles variables changing while a query is in-flight", (resolve, reject) => {
-      // The expected behavior is that the original variables are forgotten
-      // and the query stays in loading state until the result for the new variables
-      // has returned.
-      const observable: ObservableQuery<any> = mockWatchQuery(
-        {
-          request: { query, variables },
-          result: { data: dataOne },
-          delay: 20,
         },
         {
           request: { query, variables: differentVariables },
           result: { data: dataTwo },
-          delay: 20,
-        }
-      );
+        },
+      ];
 
-      observable.setVariables(differentVariables);
-
-      subscribeAndCount(reject, observable, (handleCount, result) => {
-        if (handleCount === 1) {
-          expect(result.networkStatus).toBe(NetworkStatus.ready);
-          expect(result.loading).toBe(false);
-          expect(result.data).toEqual(dataTwo);
-          resolve();
-        } else {
-          reject(new Error("should not deliver more than one result"));
-        }
+      const client = new ApolloClient({
+        cache: new InMemoryCache({ addTypename: false }),
+        link: new MockLink(mockedResponses),
       });
+      const firstRequest = mockedResponses[0].request;
+      const observable = client.watchQuery({
+        query: firstRequest.query,
+        variables: firstRequest.variables,
+        notifyOnNetworkStatusChange: true,
+      });
+
+      const stream = new ObservableStream(observable);
+
+      await expect(stream).toEmitApolloQueryResult({
+        data: dataOne,
+        loading: false,
+        networkStatus: NetworkStatus.ready,
+      });
+
+      await observable.refetch(differentVariables);
+
+      await expect(stream).toEmitApolloQueryResult({
+        // TODO: Fix this error
+        // @ts-expect-error Need to update ApolloQueryResult to allow undefined and fix this value
+        data: {},
+        loading: true,
+        networkStatus: NetworkStatus.setVariables,
+        partial: true,
+      });
+
+      await expect(stream).toEmitApolloQueryResult({
+        data: dataTwo,
+        loading: false,
+        networkStatus: NetworkStatus.ready,
+      });
+
+      await expect(stream).not.toEmitAnything();
+    });
+
+    it("does not rerun query if variables do not change", async () => {
+      const client = new ApolloClient({
+        cache: new InMemoryCache({ addTypename: false }),
+        link: new MockLink([
+          {
+            request: { query, variables },
+            result: { data: dataOne },
+          },
+          {
+            request: { query, variables },
+            result: { data: dataTwo },
+          },
+        ]),
+      });
+      const observable = client.watchQuery({ query, variables });
+      const stream = new ObservableStream(observable);
+
+      await expect(stream).toEmitApolloQueryResult({
+        data: dataOne,
+        loading: false,
+        networkStatus: NetworkStatus.ready,
+      });
+
+      await observable.setVariables(variables);
+
+      await expect(stream).not.toEmitAnything();
+    });
+
+    it("handles variables changing while a query is in-flight", async () => {
+      const client = new ApolloClient({
+        cache: new InMemoryCache({ addTypename: false }),
+        link: new MockLink([
+          {
+            request: { query, variables },
+            result: { data: dataOne },
+            delay: 20,
+          },
+          {
+            request: { query, variables: differentVariables },
+            result: { data: dataTwo },
+            delay: 20,
+          },
+        ]),
+      });
+      // The expected behavior is that the original variables are forgotten
+      // and the query stays in loading state until the result for the new variables
+      // has returned.
+      const observable = client.watchQuery({ query, variables });
+      const stream = new ObservableStream(observable);
+
+      await observable.setVariables(differentVariables);
+
+      await expect(stream).toEmitApolloQueryResult({
+        data: dataTwo,
+        loading: false,
+        networkStatus: NetworkStatus.ready,
+      });
+
+      await expect(stream).not.toEmitAnything();
     });
   });
 
   describe("refetch", () => {
-    itAsync(
-      "calls fetchRequest with fetchPolicy `network-only` when using a non-networked fetch policy",
-      (resolve, reject) => {
-        const mockedResponses = [
-          {
-            request: { query, variables },
-            result: { data: dataOne },
+    it("calls fetchRequest with fetchPolicy `network-only` when using a non-networked fetch policy", async () => {
+      const mockedResponses = [
+        {
+          request: { query, variables },
+          result: { data: dataOne },
+        },
+        {
+          request: { query, variables: differentVariables },
+          result: { data: dataTwo },
+        },
+      ];
+
+      const client = new ApolloClient({
+        cache: new InMemoryCache({ addTypename: false }),
+        link: new MockLink(mockedResponses),
+      });
+      const firstRequest = mockedResponses[0].request;
+      const observable = client.watchQuery({
+        query: firstRequest.query,
+        variables: firstRequest.variables,
+        fetchPolicy: "cache-first",
+      });
+
+      // TODO: Determine if we can test this without reaching into internal
+      // implementation details
+      const mocks = mockFetchQuery(client["queryManager"]);
+      const stream = new ObservableStream(observable);
+
+      await expect(stream).toEmitApolloQueryResult({
+        data: dataOne,
+        loading: false,
+        networkStatus: NetworkStatus.ready,
+      });
+
+      await observable.refetch(differentVariables);
+
+      await expect(stream).toEmitApolloQueryResult({
+        data: dataTwo,
+        loading: false,
+        networkStatus: NetworkStatus.ready,
+      });
+
+      const fqbpCalls = mocks.fetchQueryByPolicy.mock.calls;
+      expect(fqbpCalls.length).toBe(2);
+      expect(fqbpCalls[0][1].fetchPolicy).toEqual("cache-first");
+      expect(fqbpCalls[1][1].fetchPolicy).toEqual("network-only");
+
+      const fqoCalls = mocks.fetchConcastWithInfo.mock.calls;
+      expect(fqoCalls.length).toBe(2);
+      expect(fqoCalls[0][1].fetchPolicy).toEqual("cache-first");
+      expect(fqoCalls[1][1].fetchPolicy).toEqual("network-only");
+
+      // Although the options.fetchPolicy we passed just now to
+      // fetchQueryByPolicy should have been network-only,
+      // observable.options.fetchPolicy should now be updated to
+      // cache-first, thanks to options.nextFetchPolicy.
+      expect(observable.options.fetchPolicy).toBe("cache-first");
+
+      await expect(stream).not.toEmitAnything();
+    });
+
+    it("calling refetch with different variables before the query itself resolved will only yield the result for the new variables", async () => {
+      const observers: SubscriptionObserver<FetchResult<typeof dataOne>>[] = [];
+      const client = new ApolloClient({
+        cache: new InMemoryCache(),
+        link: new ApolloLink((operation, forward) => {
+          return new Observable((observer) => {
+            observers.push(observer);
+          });
+        }),
+      });
+      const observableQuery = client.watchQuery({
+        query,
+        variables: { id: 1 },
+      });
+      const stream = new ObservableStream(observableQuery);
+
+      void observableQuery.refetch({ id: 2 });
+
+      observers[0].next({ data: dataOne });
+      observers[0].complete();
+
+      observers[1].next({ data: dataTwo });
+      observers[1].complete();
+
+      await expect(stream).toEmitApolloQueryResult({
+        data: dataTwo,
+        loading: false,
+        networkStatus: NetworkStatus.ready,
+      });
+
+      await expect(stream).not.toEmitAnything();
+    });
+
+    it("calling refetch multiple times with different variables will return only results for the most recent variables", async () => {
+      const observers: SubscriptionObserver<FetchResult<typeof dataOne>>[] = [];
+      const client = new ApolloClient({
+        cache: new InMemoryCache(),
+        link: new ApolloLink((operation, forward) => {
+          return new Observable((observer) => {
+            observers.push(observer);
+          });
+        }),
+      });
+      const observableQuery = client.watchQuery({
+        query,
+        variables: { id: 1 },
+      });
+      const stream = new ObservableStream(observableQuery);
+
+      observers[0].next({ data: dataOne });
+      observers[0].complete();
+
+      await expect(stream).toEmitApolloQueryResult({
+        data: dataOne,
+        loading: false,
+        networkStatus: NetworkStatus.ready,
+      });
+
+      void observableQuery.refetch({ id: 2 });
+      void observableQuery.refetch({ id: 3 });
+
+      observers[1].next({ data: dataTwo });
+      observers[1].complete();
+
+      observers[2].next({
+        data: {
+          people_one: {
+            name: "SomeOneElse",
           },
-          {
-            request: { query, variables: differentVariables },
-            result: { data: dataTwo },
+        },
+      });
+      observers[2].complete();
+
+      await expect(stream).toEmitApolloQueryResult({
+        data: {
+          people_one: {
+            name: "SomeOneElse",
           },
-        ];
+        },
+        loading: false,
+        networkStatus: NetworkStatus.ready,
+      });
 
-        const queryManager = mockQueryManager(...mockedResponses);
-        const firstRequest = mockedResponses[0].request;
-        const observable = queryManager.watchQuery({
-          query: firstRequest.query,
-          variables: firstRequest.variables,
-          fetchPolicy: "cache-first",
-        });
+      await expect(stream).not.toEmitAnything();
+    });
 
-        const mocks = mockFetchQuery(queryManager);
+    it("calls fetchRequest with fetchPolicy `no-cache` when using `no-cache` fetch policy", async () => {
+      const mockedResponses = [
+        {
+          request: { query, variables },
+          result: { data: dataOne },
+        },
+        {
+          request: { query, variables: differentVariables },
+          result: { data: dataTwo },
+        },
+      ];
 
-        subscribeAndCount(reject, observable, (count, result) => {
-          if (count === 1) {
-            expect(result).toEqual({
-              loading: false,
-              networkStatus: NetworkStatus.ready,
-              data: dataOne,
-            });
+      const client = new ApolloClient({
+        cache: new InMemoryCache({ addTypename: false }),
+        link: new MockLink(mockedResponses),
+      });
+      const firstRequest = mockedResponses[0].request;
+      const observable = client.watchQuery({
+        query: firstRequest.query,
+        variables: firstRequest.variables,
+        fetchPolicy: "no-cache",
+      });
 
-            observable.refetch(differentVariables);
-          } else if (count === 2) {
-            expect(result).toEqual({
-              loading: false,
-              networkStatus: NetworkStatus.ready,
-              data: dataTwo,
-            });
+      // TODO: Determine how we can test this without looking at internal
+      // implementation details
+      const mocks = mockFetchQuery(client["queryManager"]);
+      const stream = new ObservableStream(observable);
 
-            const fqbpCalls = mocks.fetchQueryByPolicy.mock.calls;
-            expect(fqbpCalls.length).toBe(2);
-            expect(fqbpCalls[0][1].fetchPolicy).toEqual("cache-first");
-            expect(fqbpCalls[1][1].fetchPolicy).toEqual("network-only");
+      await stream.takeNext();
+      await observable.refetch(differentVariables);
 
-            const fqoCalls = mocks.fetchConcastWithInfo.mock.calls;
-            expect(fqoCalls.length).toBe(2);
-            expect(fqoCalls[0][1].fetchPolicy).toEqual("cache-first");
-            expect(fqoCalls[1][1].fetchPolicy).toEqual("network-only");
+      const fqbpCalls = mocks.fetchQueryByPolicy.mock.calls;
+      expect(fqbpCalls.length).toBe(2);
+      expect(fqbpCalls[1][1].fetchPolicy).toBe("no-cache");
 
-            // Although the options.fetchPolicy we passed just now to
-            // fetchQueryByPolicy should have been network-only,
-            // observable.options.fetchPolicy should now be updated to
-            // cache-first, thanks to options.nextFetchPolicy.
-            expect(observable.options.fetchPolicy).toBe("cache-first");
+      // Unlike network-only or cache-and-network, the no-cache
+      // FetchPolicy does not switch to cache-first after the first
+      // network request.
+      expect(observable.options.fetchPolicy).toBe("no-cache");
+      const fqoCalls = mocks.fetchConcastWithInfo.mock.calls;
+      expect(fqoCalls.length).toBe(2);
+      expect(fqoCalls[1][1].fetchPolicy).toBe("no-cache");
+    });
 
-            // Give the test time to fail if more results are delivered.
-            setTimeout(resolve, 50);
-          } else {
-            reject(new Error(`too many results (${count}, ${result})`));
-          }
-        });
-      }
-    );
-
-    itAsync(
-      "calls fetchRequest with fetchPolicy `no-cache` when using `no-cache` fetch policy",
-      (resolve, reject) => {
-        const mockedResponses = [
-          {
-            request: { query, variables },
-            result: { data: dataOne },
-          },
-          {
-            request: { query, variables: differentVariables },
-            result: { data: dataTwo },
-          },
-        ];
-
-        const queryManager = mockQueryManager(...mockedResponses);
-        const firstRequest = mockedResponses[0].request;
-        const observable = queryManager.watchQuery({
-          query: firstRequest.query,
-          variables: firstRequest.variables,
-          fetchPolicy: "no-cache",
-        });
-
-        const mocks = mockFetchQuery(queryManager);
-
-        subscribeAndCount(reject, observable, (handleCount) => {
-          if (handleCount === 1) {
-            observable.refetch(differentVariables);
-          } else if (handleCount === 2) {
-            const fqbpCalls = mocks.fetchQueryByPolicy.mock.calls;
-            expect(fqbpCalls.length).toBe(2);
-            expect(fqbpCalls[1][1].fetchPolicy).toBe("no-cache");
-
-            // Unlike network-only or cache-and-network, the no-cache
-            // FetchPolicy does not switch to cache-first after the first
-            // network request.
-            expect(observable.options.fetchPolicy).toBe("no-cache");
-            const fqoCalls = mocks.fetchConcastWithInfo.mock.calls;
-            expect(fqoCalls.length).toBe(2);
-            expect(fqoCalls[1][1].fetchPolicy).toBe("no-cache");
-
-            resolve();
-          }
-        });
-      }
-    );
-
-    itAsync("calls ObservableQuery.next even after hitting cache", (resolve, reject) => {
+    it("calls ObservableQuery.next even after hitting cache", async () => {
       // This query and variables are copied from react-apollo
       const queryWithVars = gql`
         query people($first: Int) {
@@ -1089,81 +1407,101 @@ describe("ObservableQuery", () => {
       const data2 = { allPeople: { people: [{ name: "Leia Skywalker" }] } };
       const variables2 = { first: 1 };
 
-      const queryManager = mockQueryManager(
-        {
-          request: {
-            query: queryWithVars,
-            variables: variables1,
+      const client = new ApolloClient({
+        cache: new InMemoryCache({ addTypename: false }),
+        link: new MockLink([
+          {
+            request: {
+              query: queryWithVars,
+              variables: variables1,
+            },
+            result: { data },
           },
-          result: { data },
-        },
-        {
-          request: {
-            query: queryWithVars,
-            variables: variables2,
+          {
+            request: {
+              query: queryWithVars,
+              variables: variables2,
+            },
+            result: { data: data2 },
           },
-          result: { data: data2 },
-        },
-        {
-          request: {
-            query: queryWithVars,
-            variables: variables1,
+          {
+            request: {
+              query: queryWithVars,
+              variables: variables1,
+            },
+            result: { data },
           },
-          result: { data },
-        }
-      );
+        ]),
+      });
 
-      const observable = queryManager.watchQuery({
+      const observable = client.watchQuery({
         query: queryWithVars,
         variables: variables1,
         fetchPolicy: "cache-and-network",
         notifyOnNetworkStatusChange: true,
       });
 
-      subscribeAndCount(reject, observable, (handleCount, result) => {
-        if (handleCount === 1) {
-          expect(result.data).toEqual(data);
-          expect(result.loading).toBe(false);
-          observable.refetch(variables2);
-        } else if (handleCount === 2) {
-          expect(result.loading).toBe(true);
-          expect(result.networkStatus).toBe(NetworkStatus.setVariables);
-        } else if (handleCount === 3) {
-          expect(result.data).toEqual(data2);
-          expect(result.loading).toBe(false);
-          observable.refetch(variables1);
-        } else if (handleCount === 4) {
-          expect(result.loading).toBe(true);
-          expect(result.networkStatus).toBe(NetworkStatus.setVariables);
-        } else if (handleCount === 5) {
-          expect(result.data).toEqual(data);
-          expect(result.loading).toBe(false);
-          resolve();
-        }
+      const stream = new ObservableStream(observable);
+
+      await expect(stream).toEmitApolloQueryResult({
+        data,
+        loading: false,
+        networkStatus: NetworkStatus.ready,
       });
+
+      await observable.refetch(variables2);
+
+      await expect(stream).toEmitApolloQueryResult({
+        data: {},
+        loading: true,
+        networkStatus: NetworkStatus.setVariables,
+        partial: true,
+      });
+
+      await expect(stream).toEmitApolloQueryResult({
+        data: data2,
+        loading: false,
+        networkStatus: NetworkStatus.ready,
+      });
+
+      await observable.refetch(variables1);
+
+      await expect(stream).toEmitApolloQueryResult({
+        data,
+        loading: true,
+        networkStatus: NetworkStatus.setVariables,
+      });
+
+      await expect(stream).toEmitApolloQueryResult({
+        data,
+        loading: false,
+        networkStatus: NetworkStatus.ready,
+      });
+
+      await expect(stream).not.toEmitAnything();
     });
 
-    itAsync(
-      "resets fetchPolicy when variables change when using nextFetchPolicy",
-      (resolve, reject) => {
-        // This query and variables are copied from react-apollo
-        const queryWithVars = gql`
-          query people($first: Int) {
-            allPeople(first: $first) {
-              people {
-                name
-              }
+    it("resets fetchPolicy when variables change when using nextFetchPolicy", async () => {
+      // This query and variables are copied from react-apollo
+      const queryWithVars = gql`
+        query people($first: Int) {
+          allPeople(first: $first) {
+            people {
+              name
             }
           }
-        `;
+        }
+      `;
 
-        const data = { allPeople: { people: [{ name: "Luke Skywalker" }] } };
-        const variables1 = { first: 0 };
+      const data = { allPeople: { people: [{ name: "Luke Skywalker" }] } };
+      const variables1 = { first: 0 };
 
-        const data2 = { allPeople: { people: [{ name: "Leia Skywalker" }] } };
-        const variables2 = { first: 1 };
+      const data2 = { allPeople: { people: [{ name: "Leia Skywalker" }] } };
+      const variables2 = { first: 1 };
 
-        const queryManager = mockQueryManager(
+      const client = new ApolloClient({
+        cache: new InMemoryCache({ addTypename: false }),
+        link: new MockLink([
           {
             request: {
               query: queryWithVars,
@@ -1191,501 +1529,472 @@ describe("ObservableQuery", () => {
               variables: variables2,
             },
             result: { data: data2 },
-          }
-        );
-
-        const usedFetchPolicies: WatchQueryFetchPolicy[] = [];
-        const observable = queryManager.watchQuery({
-          query: queryWithVars,
-          variables: variables1,
-          fetchPolicy: "cache-and-network",
-          nextFetchPolicy(currentFetchPolicy, info) {
-            if (info.reason === "variables-changed") {
-              return info.initialFetchPolicy;
-            }
-            usedFetchPolicies.push(currentFetchPolicy);
-            if (info.reason === "after-fetch") {
-              return "cache-first";
-            }
-            return currentFetchPolicy;
           },
-          notifyOnNetworkStatusChange: true,
-        });
+        ]),
+      });
 
-        expect(observable.options.fetchPolicy).toBe("cache-and-network");
-        expect(observable.options.initialFetchPolicy).toBe("cache-and-network");
-
-        subscribeAndCount(reject, observable, (handleCount, result) => {
-          expect(result.error).toBeUndefined();
-
-          if (handleCount === 1) {
-            expect(result.data).toEqual(data);
-            expect(result.loading).toBe(false);
-            expect(observable.options.fetchPolicy).toBe("cache-first");
-            observable.refetch(variables2);
-          } else if (handleCount === 2) {
-            expect(result.loading).toBe(true);
-            expect(result.networkStatus).toBe(NetworkStatus.setVariables);
-            expect(observable.options.fetchPolicy).toBe("cache-first");
-          } else if (handleCount === 3) {
-            expect(result.data).toEqual(data2);
-            expect(result.loading).toBe(false);
-            expect(observable.options.fetchPolicy).toBe("cache-first");
-            observable
-              .setOptions({
-                variables: variables1,
-              })
-              .then((result) => {
-                expect(result.data).toEqual(data);
-              })
-              .catch(reject);
-            expect(observable.options.fetchPolicy).toBe("cache-first");
-          } else if (handleCount === 4) {
-            expect(result.loading).toBe(true);
-            expect(result.networkStatus).toBe(NetworkStatus.setVariables);
-            expect(observable.options.fetchPolicy).toBe("cache-first");
-          } else if (handleCount === 5) {
-            expect(result.data).toEqual(data);
-            expect(result.loading).toBe(false);
-            expect(observable.options.fetchPolicy).toBe("cache-first");
-            observable
-              .reobserve({
-                variables: variables2,
-              })
-              .then((result) => {
-                expect(result.data).toEqual(data2);
-              })
-              .catch(reject);
-            expect(observable.options.fetchPolicy).toBe("cache-first");
-          } else if (handleCount === 6) {
-            expect(result.data).toEqual(data2);
-            expect(result.loading).toBe(true);
-            expect(observable.options.fetchPolicy).toBe("cache-first");
-          } else if (handleCount === 7) {
-            expect(result.data).toEqual(data2);
-            expect(result.loading).toBe(false);
-            expect(observable.options.fetchPolicy).toBe("cache-first");
-
-            expect(usedFetchPolicies).toEqual([
-              "cache-and-network",
-              "network-only",
-              "cache-and-network",
-              "cache-and-network",
-            ]);
-
-            setTimeout(resolve, 10);
-          } else {
-            reject(`too many renders (${handleCount})`);
+      const usedFetchPolicies: WatchQueryFetchPolicy[] = [];
+      const observable = client.watchQuery({
+        query: queryWithVars,
+        variables: variables1,
+        fetchPolicy: "cache-and-network",
+        nextFetchPolicy(currentFetchPolicy, info) {
+          if (info.reason === "variables-changed") {
+            return info.initialFetchPolicy;
           }
+          usedFetchPolicies.push(currentFetchPolicy);
+          if (info.reason === "after-fetch") {
+            return "cache-first";
+          }
+          return currentFetchPolicy;
+        },
+        notifyOnNetworkStatusChange: true,
+      });
+
+      expect(observable.options.fetchPolicy).toBe("cache-and-network");
+      expect(observable.options.initialFetchPolicy).toBe("cache-and-network");
+
+      const stream = new ObservableStream(observable);
+
+      await expect(stream).toEmitApolloQueryResult({
+        data,
+        loading: false,
+        networkStatus: NetworkStatus.ready,
+      });
+      expect(observable.options.fetchPolicy).toBe("cache-first");
+
+      await observable.refetch(variables2);
+
+      await expect(stream).toEmitApolloQueryResult({
+        data: {},
+        loading: true,
+        networkStatus: NetworkStatus.setVariables,
+        partial: true,
+      });
+      expect(observable.options.fetchPolicy).toBe("cache-first");
+
+      await expect(stream).toEmitApolloQueryResult({
+        data: data2,
+        loading: false,
+        networkStatus: NetworkStatus.ready,
+      });
+      expect(observable.options.fetchPolicy).toBe("cache-first");
+
+      {
+        const result = await observable.setOptions({ variables: variables1 });
+
+        expect(result).toEqualApolloQueryResult({
+          data,
+          loading: false,
+          networkStatus: NetworkStatus.ready,
         });
+        expect(observable.options.fetchPolicy).toBe("cache-first");
       }
-    );
 
-    itAsync(
-      "cache-and-network refetch should run @client(always: true) resolvers when network request fails",
-      (resolve, reject) => {
-        const query = gql`
-          query MixedQuery {
-            counter @client(always: true)
-            name
-          }
-        `;
+      await expect(stream).toEmitApolloQueryResult({
+        data,
+        loading: true,
+        networkStatus: NetworkStatus.setVariables,
+      });
+      expect(observable.options.fetchPolicy).toBe("cache-first");
 
-        let count = 0;
+      await expect(stream).toEmitApolloQueryResult({
+        data,
+        loading: false,
+        networkStatus: NetworkStatus.ready,
+      });
+      expect(observable.options.fetchPolicy).toBe("cache-first");
 
-        let linkObservable = Observable.of({
-          data: {
-            name: "Ben",
-          },
+      {
+        const result = await observable.reobserve({ variables: variables2 });
+
+        expect(result).toEqualApolloQueryResult({
+          data: data2,
+          loading: false,
+          networkStatus: NetworkStatus.ready,
         });
+        expect(observable.options.fetchPolicy).toBe("cache-first");
+      }
 
-        const intentionalNetworkFailure = new ApolloError({
-          networkError: new Error("intentional network failure"),
-        });
+      await expect(stream).toEmitApolloQueryResult({
+        data: data2,
+        loading: true,
+        networkStatus: NetworkStatus.setVariables,
+      });
+      expect(observable.options.fetchPolicy).toBe("cache-first");
 
-        const errorObservable: typeof linkObservable = new Observable((observer) => {
+      await expect(stream).toEmitApolloQueryResult({
+        data: data2,
+        loading: false,
+        networkStatus: NetworkStatus.ready,
+      });
+      expect(observable.options.fetchPolicy).toBe("cache-first");
+
+      expect(usedFetchPolicies).toEqual([
+        "cache-and-network",
+        "network-only",
+        "cache-and-network",
+        "cache-and-network",
+      ]);
+
+      await expect(stream).not.toEmitAnything();
+    });
+
+    it("cache-and-network refetch should run @client(always: true) resolvers when network request fails", async () => {
+      const query = gql`
+        query MixedQuery {
+          counter @client(always: true)
+          name
+        }
+      `;
+
+      let count = 0;
+
+      let linkObservable = Observable.of({
+        data: {
+          name: "Ben",
+        },
+      });
+
+      const intentionalNetworkFailure = new ApolloError({
+        networkError: new Error("intentional network failure"),
+      });
+
+      const errorObservable: typeof linkObservable = new Observable(
+        (observer) => {
           observer.error(intentionalNetworkFailure);
-        });
+        }
+      );
 
-        const client = new ApolloClient({
-          link: new ApolloLink((request) => linkObservable),
-          cache: new InMemoryCache(),
-          resolvers: {
-            Query: {
-              counter() {
-                return ++count;
-              },
+      const client = new ApolloClient({
+        link: new ApolloLink(() => linkObservable),
+        cache: new InMemoryCache(),
+        resolvers: {
+          Query: {
+            counter() {
+              return ++count;
             },
           },
-        });
+        },
+      });
 
-        const observable = client.watchQuery({
-          query,
-          fetchPolicy: "cache-and-network",
-          returnPartialData: true,
-        });
+      const observable = client.watchQuery({
+        query,
+        fetchPolicy: "cache-and-network",
+        returnPartialData: true,
+      });
 
-        let handleCount = 0;
-        observable.subscribe({
-          error(error) {
-            expect(error).toBe(intentionalNetworkFailure);
-          },
+      const stream = new ObservableStream(observable);
 
-          next(result) {
-            ++handleCount;
+      await expect(stream).toEmitApolloQueryResult({
+        data: { counter: 1 },
+        loading: true,
+        networkStatus: NetworkStatus.loading,
+        partial: true,
+      });
 
-            if (handleCount === 1) {
-              expect(result).toEqual({
-                data: {
-                  counter: 1,
-                },
-                loading: true,
-                networkStatus: NetworkStatus.loading,
-                partial: true,
-              });
-            } else if (handleCount === 2) {
-              expect(result).toEqual({
-                data: {
-                  counter: 2,
-                  name: "Ben",
-                },
-                loading: false,
-                networkStatus: NetworkStatus.ready,
-              });
+      await expect(stream).toEmitApolloQueryResult({
+        data: { counter: 2, name: "Ben" },
+        loading: false,
+        networkStatus: NetworkStatus.ready,
+      });
 
-              const oldLinkObs = linkObservable;
-              // Make the next network request fail.
-              linkObservable = errorObservable;
+      const oldLinkObs = linkObservable;
+      // Make the next network request fail.
+      linkObservable = errorObservable;
 
-              observable.refetch().then(
-                () => {
-                  reject(new Error("should have gotten an error"));
-                },
+      await expect(() => observable.refetch()).rejects.toThrow(
+        intentionalNetworkFailure
+      );
 
-                (error) => {
-                  expect(error).toBe(intentionalNetworkFailure);
+      await expect(stream).toEmitApolloQueryResult({
+        data: { counter: 3, name: "Ben" },
+        loading: true,
+        networkStatus: NetworkStatus.refetch,
+      });
 
-                  // Switch back from errorObservable.
-                  linkObservable = oldLinkObs;
+      await expect(stream).toEmitError(intentionalNetworkFailure);
 
-                  observable.refetch().then((result) => {
-                    expect(result).toEqual({
-                      data: {
-                        counter: 5,
-                        name: "Ben",
-                      },
-                      loading: false,
-                      networkStatus: NetworkStatus.ready,
-                    });
-                    setTimeout(resolve, 50);
-                  }, reject);
-                }
-              );
-            } else if (handleCount === 3) {
-              expect(result).toEqual({
-                data: {
-                  counter: 3,
-                  name: "Ben",
-                },
-                loading: true,
-                networkStatus: NetworkStatus.refetch,
-              });
-            } else if (handleCount > 3) {
-              reject(new Error("should not get here"));
-            }
-          },
-        });
-      }
-    );
+      // Switch back from errorObservable.
+      linkObservable = oldLinkObs;
+
+      const result = await observable.refetch();
+
+      expect(result).toEqualApolloQueryResult({
+        data: {
+          counter: 5,
+          name: "Ben",
+        },
+        loading: false,
+        networkStatus: NetworkStatus.ready,
+      });
+
+      await expect(stream).not.toEmitAnything();
+    });
 
     describe("warnings about refetch({ variables })", () => {
-      itAsync(
-        "should warn if passed { variables } and query does not declare any variables",
-        (resolve, reject) => {
-          const consoleWarnSpy = jest.spyOn(console, "warn");
-          consoleWarnSpy.mockImplementation(() => {});
+      it("should warn if passed { variables } and query does not declare any variables", async () => {
+        using _ = spyOnConsole("warn");
 
-          const queryWithoutVariables = gql`
-            query QueryWithoutVariables {
-              getVars {
-                __typename
-                name
-              }
+        const queryWithoutVariables = gql`
+          query QueryWithoutVariables {
+            getVars {
+              __typename
+              name
             }
-          `;
-
-          function makeMock(...vars: string[]) {
-            const requestWithoutVariables = {
-              query: queryWithoutVariables,
-              variables: {
-                variables: vars,
-              },
-            };
-
-            const resultWithVariables = {
-              data: {
-                getVars: vars.map((name) => ({
-                  __typename: "Var",
-                  name,
-                })),
-              },
-            };
-
-            return {
-              request: requestWithoutVariables,
-              result: resultWithVariables,
-            };
           }
+        `;
 
-          const observableWithoutVariables: ObservableQuery<any> = mockWatchQuery(
-            makeMock("a", "b", "c"),
-            makeMock("d", "e")
-          );
-
-          subscribeAndCount(reject, observableWithoutVariables, (count, result) => {
-            expect(result.error).toBeUndefined();
-
-            if (count === 1) {
-              expect(result.loading).toBe(false);
-              expect(result.data).toEqual({
-                getVars: [
-                  { __typename: "Var", name: "a" },
-                  { __typename: "Var", name: "b" },
-                  { __typename: "Var", name: "c" },
-                ],
-              });
-
-              // It's a common mistake to call refetch({ variables }) when you meant
-              // to call refetch(variables).
-              observableWithoutVariables
-                .refetch({
-                  variables: ["d", "e"],
-                })
-                .catch(reject);
-            } else if (count === 2) {
-              expect(result.loading).toBe(false);
-              expect(result.data).toEqual({
-                getVars: [
-                  { __typename: "Var", name: "d" },
-                  { __typename: "Var", name: "e" },
-                ],
-              });
-
-              expect(consoleWarnSpy).toHaveBeenCalledTimes(1);
-              expect(consoleWarnSpy).toHaveBeenCalledWith(
-                [
-                  'Called refetch(%o) for query %o, which does not declare a $variables variable.',
-                  "Did you mean to call refetch(variables) instead of refetch({ variables })?",
-                ].join("\n"),
-                {"variables": ["d", "e"]}, 
-                "QueryWithoutVariables"
-              );
-              consoleWarnSpy.mockRestore();
-
-              setTimeout(resolve, 10);
-            } else {
-              reject(`too many results (${count})`);
-            }
-          });
-        }
-      );
-
-      itAsync(
-        "should warn if passed { variables } and query does not declare $variables",
-        (resolve, reject) => {
-          const consoleWarnSpy = jest.spyOn(console, "warn");
-          consoleWarnSpy.mockImplementation(() => {});
-
-          const queryWithVarsVar = gql`
-            query QueryWithVarsVar($vars: [String!]) {
-              getVars(variables: $vars) {
-                __typename
-                name
-              }
-            }
-          `;
-
-          function makeMock(...vars: string[]) {
-            const requestWithVarsVar = {
-              query: queryWithVarsVar,
-              variables: { vars },
-            };
-
-            const resultWithVarsVar = {
-              data: {
-                getVars: vars.map((name) => ({
-                  __typename: "Var",
-                  name,
-                })),
-              },
-            };
-
-            return {
-              request: requestWithVarsVar,
-              result: resultWithVarsVar,
-            };
-          }
-
-          // We construct the queryManager manually here rather than using
-          // `mockWatchQuery` because we need to silence console warnings for
-          // unmatched variables since. This test checks for calls to
-          // `console.warn` and unfortunately `mockSingleLink` (used by
-          // `mockWatchQuery`) does not support the ability to disable warnings
-          // without introducing a breaking change. Instead we construct this
-          // manually to be able to turn off warnings for this test.
-          const mocks = [makeMock("a", "b", "c"), makeMock("d", "e")];
-          const firstRequest = mocks[0].request;
-          const queryManager = new QueryManager({
-            cache: new InMemoryCache({ addTypename: false }),
-            link: new MockLink(mocks, true, { showWarnings: false }),
-          });
-
-          const observableWithVarsVar = queryManager.watchQuery({
-            query: firstRequest.query,
-            variables: firstRequest.variables,
-            notifyOnNetworkStatusChange: false,
-          });
-
-          subscribeAndCount(
-            (error) => {
-              expect(error.message).toMatch(
-                "No more mocked responses for the query: query QueryWithVarsVar($vars: [String!])"
-              );
+        function makeMock(...vars: string[]) {
+          const requestWithoutVariables = {
+            query: queryWithoutVariables,
+            variables: {
+              variables: vars,
             },
-            observableWithVarsVar,
-            (count, result) => {
-              expect(result.error).toBeUndefined();
+          };
 
-              if (count === 1) {
-                expect(result.loading).toBe(false);
-                expect(result.data).toEqual({
-                  getVars: [
-                    { __typename: "Var", name: "a" },
-                    { __typename: "Var", name: "b" },
-                    { __typename: "Var", name: "c" },
-                  ],
-                });
+          const resultWithVariables = {
+            data: {
+              getVars: vars.map((name) => ({
+                __typename: "Var",
+                name,
+              })),
+            },
+          };
 
-                // It's a common mistake to call refetch({ variables }) when you meant
-                // to call refetch(variables).
-                observableWithVarsVar
-                  .refetch({
-                    variables: { vars: ["d", "e"] },
-                  } as any)
-                  .then(
-                    (result) => {
-                      reject(`unexpected result ${JSON.stringify(result)}; should have thrown`);
-                    },
-                    (error) => {
-                      expect(error.message).toMatch(
-                        "No more mocked responses for the query: query QueryWithVarsVar($vars: [String!])"
-                      );
-                      expect(consoleWarnSpy).toHaveBeenCalledTimes(1);
-                      expect(consoleWarnSpy).toHaveBeenCalledWith(
-                        [
-                          'Called refetch(%o) for query %o, which does not declare a $variables variable.',
-                          "Did you mean to call refetch(variables) instead of refetch({ variables })?",
-                        ].join("\n"),
-                        {"variables":{"vars":["d","e"]}},
-                        "QueryWithVarsVar"
-                      );
-                      consoleWarnSpy.mockRestore();
-
-                      setTimeout(resolve, 10);
-                    }
-                  );
-              } else {
-                reject(`one too many (${count}) results: ${JSON.stringify(result)}`);
-              }
-            }
-          );
+          return {
+            request: requestWithoutVariables,
+            result: resultWithVariables,
+          };
         }
-      );
 
-      itAsync(
-        "should not warn if passed { variables } and query declares $variables",
-        (resolve, reject) => {
-          const consoleWarnSpy = jest.spyOn(console, "warn");
-          consoleWarnSpy.mockImplementation(() => {});
+        const client = new ApolloClient({
+          cache: new InMemoryCache({ addTypename: false }),
+          link: new MockLink([makeMock("a", "b", "c"), makeMock("d", "e")]),
+        });
+        const observableWithoutVariables = client.watchQuery({
+          query: queryWithoutVariables,
+          variables: { variables: ["a", "b", "c"] },
+        });
 
-          const queryWithVariablesVar = gql`
-            query QueryWithVariablesVar($variables: [String!]) {
-              getVars(variables: $variables) {
-                __typename
-                name
-              }
+        const stream = new ObservableStream(observableWithoutVariables);
+
+        await expect(stream).toEmitApolloQueryResult({
+          data: {
+            getVars: [
+              { __typename: "Var", name: "a" },
+              { __typename: "Var", name: "b" },
+              { __typename: "Var", name: "c" },
+            ],
+          },
+          loading: false,
+          networkStatus: NetworkStatus.ready,
+        });
+
+        await observableWithoutVariables.refetch({
+          variables: ["d", "e"],
+        });
+
+        await expect(stream).toEmitApolloQueryResult({
+          data: {
+            getVars: [
+              { __typename: "Var", name: "d" },
+              { __typename: "Var", name: "e" },
+            ],
+          },
+          loading: false,
+          networkStatus: NetworkStatus.ready,
+        });
+
+        expect(console.warn).toHaveBeenCalledTimes(1);
+        expect(console.warn).toHaveBeenCalledWith(
+          [
+            "Called refetch(%o) for query %o, which does not declare a $variables variable.",
+            "Did you mean to call refetch(variables) instead of refetch({ variables })?",
+          ].join("\n"),
+          { variables: ["d", "e"] },
+          "QueryWithoutVariables"
+        );
+
+        await expect(stream).not.toEmitAnything();
+      });
+
+      it("should warn if passed { variables } and query does not declare $variables", async () => {
+        using _ = spyOnConsole("warn");
+
+        const queryWithVarsVar = gql`
+          query QueryWithVarsVar($vars: [String!]) {
+            getVars(variables: $vars) {
+              __typename
+              name
             }
-          `;
-
-          function makeMock(...variables: string[]) {
-            const requestWithVariablesVar = {
-              query: queryWithVariablesVar,
-              variables: {
-                variables,
-              },
-            };
-
-            const resultWithVariablesVar = {
-              data: {
-                getVars: variables.map((name) => ({
-                  __typename: "Var",
-                  name,
-                })),
-              },
-            };
-
-            return {
-              request: requestWithVariablesVar,
-              result: resultWithVariablesVar,
-            };
           }
+        `;
 
-          const observableWithVariablesVar: ObservableQuery<any> = mockWatchQuery(
-            makeMock("a", "b", "c"),
-            makeMock("d", "e")
-          );
+        function makeMock(...vars: string[]) {
+          const requestWithVarsVar = {
+            query: queryWithVarsVar,
+            variables: { vars },
+          };
 
-          subscribeAndCount(reject, observableWithVariablesVar, (count, result) => {
-            expect(result.error).toBeUndefined();
-            if (count === 1) {
-              expect(result.loading).toBe(false);
-              expect(result.data).toEqual({
-                getVars: [
-                  { __typename: "Var", name: "a" },
-                  { __typename: "Var", name: "b" },
-                  { __typename: "Var", name: "c" },
-                ],
-              });
+          const resultWithVarsVar = {
+            data: {
+              getVars: vars.map((name) => ({
+                __typename: "Var",
+                name,
+              })),
+            },
+          };
 
-              observableWithVariablesVar
-                .refetch({
-                  variables: ["d", "e"],
-                })
-                .catch(reject);
-            } else if (count === 2) {
-              expect(result.loading).toBe(false);
-              expect(result.data).toEqual({
-                getVars: [
-                  { __typename: "Var", name: "d" },
-                  { __typename: "Var", name: "e" },
-                ],
-              });
-
-              expect(consoleWarnSpy).not.toHaveBeenCalled();
-              consoleWarnSpy.mockRestore();
-
-              setTimeout(resolve, 10);
-            } else {
-              reject(`too many results (${count})`);
-            }
-          });
+          return {
+            request: requestWithVarsVar,
+            result: resultWithVarsVar,
+          };
         }
-      );
+
+        const mocks = [makeMock("a", "b", "c"), makeMock("d", "e")];
+        const firstRequest = mocks[0].request;
+        const client = new ApolloClient({
+          cache: new InMemoryCache({ addTypename: false }),
+          link: new MockLink(mocks, true, { showWarnings: false }),
+        });
+
+        const observableWithVarsVar = client.watchQuery({
+          query: firstRequest.query,
+          variables: firstRequest.variables,
+          notifyOnNetworkStatusChange: false,
+        });
+
+        const stream = new ObservableStream(observableWithVarsVar);
+
+        await expect(stream).toEmitApolloQueryResult({
+          data: {
+            getVars: [
+              { __typename: "Var", name: "a" },
+              { __typename: "Var", name: "b" },
+              { __typename: "Var", name: "c" },
+            ],
+          },
+          loading: false,
+          networkStatus: NetworkStatus.ready,
+        });
+
+        // It's a common mistake to call refetch({ variables }) when you meant
+        // to call refetch(variables).
+        const promise = observableWithVarsVar.refetch({
+          // @ts-expect-error
+          variables: { vars: ["d", "e"] },
+        });
+
+        await expect(stream).toEmitError(
+          expect.objectContaining({
+            message: expect.stringMatching(
+              /No more mocked responses for the query: query QueryWithVarsVar\(\$vars: \[String!\]\)/
+            ),
+          })
+        );
+
+        await expect(promise).rejects.toEqual(
+          expect.objectContaining({
+            message: expect.stringMatching(
+              /No more mocked responses for the query: query QueryWithVarsVar\(\$vars: \[String!\]\)/
+            ),
+          })
+        );
+        expect(console.warn).toHaveBeenCalledTimes(1);
+        expect(console.warn).toHaveBeenCalledWith(
+          [
+            "Called refetch(%o) for query %o, which does not declare a $variables variable.",
+            "Did you mean to call refetch(variables) instead of refetch({ variables })?",
+          ].join("\n"),
+          { variables: { vars: ["d", "e"] } },
+          "QueryWithVarsVar"
+        );
+
+        await expect(stream).not.toEmitAnything();
+      });
+
+      it("should not warn if passed { variables } and query declares $variables", async () => {
+        using _ = spyOnConsole("warn");
+
+        const queryWithVariablesVar = gql`
+          query QueryWithVariablesVar($variables: [String!]) {
+            getVars(variables: $variables) {
+              __typename
+              name
+            }
+          }
+        `;
+
+        function makeMock(...variables: string[]) {
+          const requestWithVariablesVar = {
+            query: queryWithVariablesVar,
+            variables: {
+              variables,
+            },
+          };
+
+          const resultWithVariablesVar = {
+            data: {
+              getVars: variables.map((name) => ({
+                __typename: "Var",
+                name,
+              })),
+            },
+          };
+
+          return {
+            request: requestWithVariablesVar,
+            result: resultWithVariablesVar,
+          };
+        }
+
+        const client = new ApolloClient({
+          cache: new InMemoryCache({ addTypename: false }),
+          link: new MockLink([makeMock("a", "b", "c"), makeMock("d", "e")]),
+        });
+
+        const observableWithVariablesVar = client.watchQuery({
+          query: queryWithVariablesVar,
+          variables: { variables: ["a", "b", "c"] },
+        });
+
+        const stream = new ObservableStream(observableWithVariablesVar);
+
+        await expect(stream).toEmitApolloQueryResult({
+          data: {
+            getVars: [
+              { __typename: "Var", name: "a" },
+              { __typename: "Var", name: "b" },
+              { __typename: "Var", name: "c" },
+            ],
+          },
+          loading: false,
+          networkStatus: NetworkStatus.ready,
+        });
+
+        await observableWithVariablesVar.refetch({ variables: ["d", "e"] });
+
+        await expect(stream).toEmitApolloQueryResult({
+          data: {
+            getVars: [
+              { __typename: "Var", name: "d" },
+              { __typename: "Var", name: "e" },
+            ],
+          },
+          loading: false,
+          networkStatus: NetworkStatus.ready,
+        });
+
+        expect(console.warn).not.toHaveBeenCalled();
+
+        await expect(stream).not.toEmitAnything();
+      });
     });
   });
 
   describe("currentResult", () => {
-    itAsync("returns the same value as observableQuery.next got", (resolve, reject) => {
+    it("returns the same value as observableQuery.next got", async () => {
       const queryWithFragment = gql`
         fragment CatInfo on Cat {
           isTabby
@@ -1752,19 +2061,17 @@ describe("ObservableQuery", () => {
         pets: petData.slice(0, 3),
       };
 
-      const ni = mockSingleLink(
-        {
-          request: { query: queryWithFragment, variables },
-          result: { data: dataOneWithTypename },
-        },
-        {
-          request: { query: queryWithFragment, variables },
-          result: { data: dataTwoWithTypename },
-        }
-      ).setOnError(reject);
-
       const client = new ApolloClient({
-        link: ni,
+        link: new MockLink([
+          {
+            request: { query: queryWithFragment, variables },
+            result: { data: dataOneWithTypename },
+          },
+          {
+            request: { query: queryWithFragment, variables },
+            result: { data: dataTwoWithTypename },
+          },
+        ]),
         cache: new InMemoryCache({
           possibleTypes: {
             Creature: ["Pet"],
@@ -1779,260 +2086,290 @@ describe("ObservableQuery", () => {
         notifyOnNetworkStatusChange: true,
       });
 
-      subscribeAndCount(reject, observable, (count, result) => {
-        const { data, loading, networkStatus } = observable.getCurrentResult();
-        expect(result.loading).toEqual(loading);
-        expect(result.networkStatus).toEqual(networkStatus);
-        expect(result.data).toEqual(data);
+      const stream = new ObservableStream(observable);
 
-        if (count === 1) {
-          expect(result.loading).toBe(false);
-          expect(result.networkStatus).toEqual(NetworkStatus.ready);
-          expect(result.data).toEqual(dataOneWithTypename);
-          observable.refetch();
-        } else if (count === 2) {
-          expect(result.loading).toBe(true);
-          expect(result.networkStatus).toEqual(NetworkStatus.refetch);
-        } else if (count === 3) {
-          expect(result.loading).toBe(false);
-          expect(result.networkStatus).toEqual(NetworkStatus.ready);
-          expect(result.data).toEqual(dataTwoWithTypename);
-          setTimeout(resolve, 5);
-        } else {
-          reject(new Error("Observable.next called too many times"));
-        }
+      await expect(stream).toEmitApolloQueryResult({
+        data: dataOneWithTypename,
+        loading: false,
+        networkStatus: NetworkStatus.ready,
       });
+
+      expect(observable.getCurrentResult()).toEqualApolloQueryResult({
+        data: dataOneWithTypename,
+        loading: false,
+        networkStatus: NetworkStatus.ready,
+      });
+
+      void observable.refetch();
+
+      await expect(stream).toEmitApolloQueryResult({
+        data: dataOneWithTypename,
+        loading: true,
+        networkStatus: NetworkStatus.refetch,
+      });
+      expect(observable.getCurrentResult()).toEqual({
+        data: dataOneWithTypename,
+        loading: true,
+        networkStatus: NetworkStatus.refetch,
+      });
+
+      await expect(stream).toEmitApolloQueryResult({
+        data: dataTwoWithTypename,
+        loading: false,
+        networkStatus: NetworkStatus.ready,
+      });
+      expect(observable.getCurrentResult()).toEqual({
+        data: dataTwoWithTypename,
+        loading: false,
+        networkStatus: NetworkStatus.ready,
+      });
+
+      await expect(stream).not.toEmitAnything();
     });
 
-    itAsync("returns the current query status immediately", (resolve, reject) => {
-      const observable: ObservableQuery<any> = mockWatchQuery({
-        request: { query, variables },
-        result: { data: dataOne },
-        delay: 100,
+    it("returns the current query status immediately", async () => {
+      const client = new ApolloClient({
+        cache: new InMemoryCache({ addTypename: false }),
+        link: new MockLink([
+          {
+            request: { query, variables },
+            result: { data: dataOne },
+            delay: 100,
+          },
+        ]),
       });
+      const observable = client.watchQuery({ query, variables });
+      const stream = new ObservableStream(observable);
 
-      subscribeAndCount(reject, observable, () => {
-        expect(observable.getCurrentResult()).toEqual({
-          data: dataOne,
-          loading: false,
-          networkStatus: 7,
-        });
-        resolve();
-      });
-
-      expect(observable.getCurrentResult()).toEqual({
+      // TODO: Fix this error
+      // @ts-expect-error ApolloQueryResult expects a `data` property, but the value returned from `getCurrentResult` does not include it
+      expect(observable.getCurrentResult()).toEqualApolloQueryResult({
         loading: true,
-        data: undefined,
-        networkStatus: 1,
+        networkStatus: NetworkStatus.loading,
         partial: true,
       });
 
-      setTimeout(
-        wrap(reject, () => {
-          expect(observable.getCurrentResult()).toEqual({
-            loading: true,
-            data: undefined,
-            networkStatus: 1,
-            partial: true,
-          });
-        }),
-        0
+      await tick();
+
+      // TODO: Fix this error
+      // @ts-expect-error ApolloQueryResult expects a `data` property, but the value returned from `getCurrentResult` does not include it
+      expect(observable.getCurrentResult()).toEqualApolloQueryResult({
+        loading: true,
+        networkStatus: NetworkStatus.loading,
+        partial: true,
+      });
+
+      await stream.takeNext();
+
+      expect(observable.getCurrentResult()).toEqualApolloQueryResult({
+        data: dataOne,
+        loading: false,
+        networkStatus: 7,
+      });
+    });
+
+    it("returns results from the store immediately", async () => {
+      const client = new ApolloClient({
+        cache: new InMemoryCache({ addTypename: false }),
+        link: new MockLink([
+          {
+            request: { query, variables },
+            result: { data: dataOne },
+          },
+        ]),
+      });
+
+      const result = await client.query({ query, variables });
+
+      expect(result).toEqualApolloQueryResult({
+        data: dataOne,
+        loading: false,
+        networkStatus: 7,
+      });
+
+      const observable = client.watchQuery({ query, variables });
+
+      expect(observable.getCurrentResult()).toEqualApolloQueryResult({
+        data: dataOne,
+        loading: false,
+        networkStatus: NetworkStatus.ready,
+      });
+    });
+
+    it("returns errors from the store immediately", async () => {
+      const client = new ApolloClient({
+        cache: new InMemoryCache({ addTypename: false }),
+        link: new MockLink([
+          {
+            request: { query, variables },
+            result: { errors: [error] },
+          },
+        ]),
+      });
+
+      const observable = client.watchQuery({ query, variables });
+      const stream = new ObservableStream(observable);
+
+      await expect(stream).toEmitError(
+        new ApolloError({ graphQLErrors: [error] })
       );
-    });
-
-    itAsync("returns results from the store immediately", (resolve, reject) => {
-      const queryManager = mockQueryManager({
-        request: { query, variables },
-        result: { data: dataOne },
-      });
-
-      return queryManager
-        .query({ query, variables })
-        .then((result: any) => {
-          expect(result).toEqual({
-            data: dataOne,
-            loading: false,
-            networkStatus: 7,
-          });
-          const observable = queryManager.watchQuery({
-            query,
-            variables,
-          });
-          expect(observable.getCurrentResult()).toEqual({
-            data: dataOne,
-            loading: false,
-            networkStatus: NetworkStatus.ready,
-          });
-        })
-        .then(resolve, reject);
-    });
-
-    itAsync("returns errors from the store immediately", (resolve) => {
-      const queryManager = mockQueryManager({
-        request: { query, variables },
-        result: { errors: [error] },
-      });
-
-      const observable = queryManager.watchQuery({
-        query,
-        variables,
-      });
-
-      observable.subscribe({
-        error: (theError) => {
-          expect(theError.graphQLErrors).toEqual([error]);
-
-          const currentResult = observable.getCurrentResult();
-          expect(currentResult.loading).toBe(false);
-          expect(currentResult.error!.graphQLErrors).toEqual([error]);
-          resolve();
-        },
+      // TODO: Fix this error
+      // @ts-expect-error ApolloQueryResult expects `data` property to be defined but it is not returned here
+      expect(observable.getCurrentResult()).toEqualApolloQueryResult({
+        error: new ApolloError({ graphQLErrors: [error] }),
+        errors: [error],
+        loading: false,
+        networkStatus: NetworkStatus.error,
+        partial: true,
       });
     });
 
-    itAsync("returns referentially equal errors", (resolve, reject) => {
-      const queryManager = mockQueryManager({
-        request: { query, variables },
-        result: { errors: [error] },
+    it("returns referentially equal errors", async () => {
+      const client = new ApolloClient({
+        cache: new InMemoryCache({ addTypename: false }),
+        link: new MockLink([
+          {
+            request: { query, variables },
+            result: { errors: [error] },
+          },
+        ]),
       });
 
-      const observable = queryManager.watchQuery({
-        query,
-        variables,
+      const observable = client.watchQuery({ query, variables });
+
+      await expect(observable.result()).rejects.toThrow(
+        new ApolloError({ graphQLErrors: [error] })
+      );
+
+      const currentResult = observable.getCurrentResult();
+      const currentResult2 = observable.getCurrentResult();
+
+      // @ts-expect-error ApolloQueryResult expects a `data` property to be returned
+      expect(currentResult).toEqualApolloQueryResult({
+        error: new ApolloError({ graphQLErrors: [error] }),
+        errors: [error],
+        loading: false,
+        networkStatus: NetworkStatus.error,
+        partial: true,
       });
 
-      return observable
-        .result()
-        .catch((theError: any) => {
-          expect(theError.graphQLErrors).toEqual([error]);
-
-          const currentResult = observable.getCurrentResult();
-          expect(currentResult.loading).toBe(false);
-          expect(currentResult.error!.graphQLErrors).toEqual([error]);
-          const currentResult2 = observable.getCurrentResult();
-          expect(currentResult.error === currentResult2.error).toBe(true);
-        })
-        .then(resolve, reject);
+      expect(currentResult.error === currentResult2.error).toBe(true);
     });
 
-    itAsync("returns errors with data if errorPolicy is all", (resolve, reject) => {
-      const queryManager = mockQueryManager({
-        request: { query, variables },
-        result: { data: dataOne, errors: [error] },
+    it("returns errors with data if errorPolicy is all", async () => {
+      const client = new ApolloClient({
+        cache: new InMemoryCache({ addTypename: false }),
+        link: new MockLink([
+          {
+            request: { query, variables },
+            result: { data: dataOne, errors: [error] },
+          },
+        ]),
       });
 
-      const observable = queryManager.watchQuery({
+      const observable = client.watchQuery({
         query,
         variables,
         errorPolicy: "all",
       });
 
-      return observable
-        .result()
-        .then((result) => {
-          expect(result.data).toEqual(dataOne);
-          expect(result.errors).toEqual([error]);
-          const currentResult = observable.getCurrentResult();
-          expect(currentResult.loading).toBe(false);
-          expect(currentResult.errors).toEqual([error]);
-          expect(currentResult.error).toBeUndefined();
-        })
-        .then(resolve, reject);
+      const result = await observable.result();
+      const currentResult = observable.getCurrentResult();
+
+      expect(result).toEqualApolloQueryResult({
+        data: dataOne,
+        errors: [error],
+        loading: false,
+        networkStatus: NetworkStatus.error,
+      });
+      expect(currentResult).toEqualApolloQueryResult({
+        data: dataOne,
+        errors: [error],
+        loading: false,
+        // TODO: The networkStatus returned here is different than the one
+        // returned from `observable.result()`. These should match
+        networkStatus: NetworkStatus.ready,
+      });
     });
 
-    itAsync("errors out if errorPolicy is none", (resolve, reject) => {
-      const queryManager = mockQueryManager({
-        request: { query, variables },
-        result: { data: dataOne, errors: [error] },
+    it("errors out if errorPolicy is none", async () => {
+      const client = new ApolloClient({
+        cache: new InMemoryCache({ addTypename: false }),
+        link: new MockLink([
+          {
+            request: { query, variables },
+            result: { data: dataOne, errors: [error] },
+          },
+        ]),
       });
 
-      const observable = queryManager.watchQuery({
+      const observable = client.watchQuery({
         query,
         variables,
         errorPolicy: "none",
       });
 
-      return observable
-        .result()
-        .then(() => reject("Observable did not error when it should have"))
-        .catch((currentError) => {
-          expect(currentError).toEqual(error);
-          const lastError = observable.getLastError();
-          expect(lastError).toEqual(error);
-          resolve();
-        })
-        .catch(reject);
+      await expect(observable.result()).rejects.toEqual(wrappedError);
+
+      expect(observable.getLastError()).toEqual(wrappedError);
     });
 
-    itAsync(
-      "errors out if errorPolicy is none and the observable has completed",
-      (resolve, reject) => {
-        const queryManager = mockQueryManager(
+    it("errors out if errorPolicy is none and the observable has completed", async () => {
+      const client = new ApolloClient({
+        cache: new InMemoryCache({ addTypename: false }),
+        link: new MockLink([
           {
             request: { query, variables },
             result: { data: dataOne, errors: [error] },
           },
-          // FIXME: We shouldn't need a second mock, there should only be one network request
-          {
-            request: { query, variables },
-            result: { data: dataOne, errors: [error] },
-          }
-        );
-
-        const observable = queryManager.watchQuery({
-          query,
-          variables,
-          errorPolicy: "none",
-        });
-
-        return (
-          observable
-            .result()
-            .then(() => reject("Observable did not error when it should have"))
-            // We wait for the observable to error out and reobtain a promise
-            .catch(() => observable.result())
-            .then((result) =>
-              reject(
-                "Observable did not error the second time we fetched results when it should have"
-              )
-            )
-            .catch((currentError) => {
-              expect(currentError).toEqual(error);
-              const lastError = observable.getLastError();
-              expect(lastError).toEqual(error);
-              resolve();
-            })
-            .catch(reject)
-        );
-      }
-    );
-
-    itAsync("ignores errors with data if errorPolicy is ignore", (resolve, reject) => {
-      const queryManager = mockQueryManager({
-        request: { query, variables },
-        result: { errors: [error], data: dataOne },
+        ]),
       });
 
-      const observable = queryManager.watchQuery({
+      const observable = client.watchQuery({
+        query,
+        variables,
+        errorPolicy: "none",
+      });
+
+      await expect(observable.result()).rejects.toEqual(wrappedError);
+      await expect(observable.result()).rejects.toEqual(wrappedError);
+
+      expect(observable.getLastError()).toEqual(wrappedError);
+    });
+
+    it("ignores errors with data if errorPolicy is ignore", async () => {
+      const client = new ApolloClient({
+        cache: new InMemoryCache({ addTypename: false }),
+        link: new MockLink([
+          {
+            request: { query, variables },
+            result: { errors: [error], data: dataOne },
+          },
+        ]),
+      });
+
+      const observable = client.watchQuery({
         query,
         variables,
         errorPolicy: "ignore",
       });
 
-      return observable
-        .result()
-        .then((result) => {
-          expect(result.data).toEqual(dataOne);
-          expect(result.errors).toBeUndefined();
-          const currentResult = observable.getCurrentResult();
-          expect(currentResult.loading).toBe(false);
-          expect(currentResult.errors).toBeUndefined();
-          expect(currentResult.error).toBeUndefined();
-        })
-        .then(resolve, reject);
+      const result = await observable.result();
+      const currentResult = observable.getCurrentResult();
+
+      expect(result).toEqualApolloQueryResult({
+        data: dataOne,
+        loading: false,
+        networkStatus: NetworkStatus.ready,
+      });
+      expect(currentResult).toEqualApolloQueryResult({
+        data: dataOne,
+        loading: false,
+        networkStatus: NetworkStatus.ready,
+      });
     });
 
-    itAsync("returns partial data from the store immediately", (resolve, reject) => {
+    it("returns partial data from the store immediately", async () => {
       const superQuery = gql`
         query superQuery($id: ID!) {
           people_one(id: $id) {
@@ -2049,62 +2386,68 @@ describe("ObservableQuery", () => {
         },
       };
 
-      const queryManager = mockQueryManager(
-        {
-          request: { query, variables },
-          result: { data: dataOne },
-        },
-        {
-          request: { query: superQuery, variables },
-          result: { data: superDataOne },
-        }
-      );
-
-      queryManager.query({ query, variables }).then((result) => {
-        const observable = queryManager.watchQuery({
-          query: superQuery,
-          variables,
-          returnPartialData: true,
-        });
-
-        expect(observable.getCurrentResult()).toEqual({
-          data: dataOne,
-          loading: true,
-          networkStatus: 1,
-          partial: true,
-        });
-
-        // we can use this to trigger the query
-        subscribeAndCount(reject, observable, (handleCount, subResult) => {
-          const { data, loading, networkStatus } = observable.getCurrentResult();
-
-          expect(subResult.data).toEqual(data);
-          expect(subResult.loading).toEqual(loading);
-          expect(subResult.networkStatus).toEqual(networkStatus);
-
-          if (handleCount === 1) {
-            expect(subResult).toEqual({
-              data: dataOne,
-              loading: true,
-              networkStatus: 1,
-              partial: true,
-            });
-          } else if (handleCount === 2) {
-            expect(subResult).toEqual({
-              data: superDataOne,
-              loading: false,
-              networkStatus: 7,
-            });
-            resolve();
-          }
-        });
+      const client = new ApolloClient({
+        cache: new InMemoryCache({ addTypename: false }),
+        link: new MockLink([
+          {
+            request: { query, variables },
+            result: { data: dataOne },
+          },
+          {
+            request: { query: superQuery, variables },
+            result: { data: superDataOne },
+          },
+        ]),
       });
+
+      await client.query({ query, variables });
+
+      const observable = client.watchQuery({
+        query: superQuery,
+        variables,
+        returnPartialData: true,
+      });
+
+      expect(observable.getCurrentResult()).toEqualApolloQueryResult({
+        data: dataOne,
+        loading: true,
+        networkStatus: NetworkStatus.loading,
+        partial: true,
+      });
+
+      const stream = new ObservableStream(observable);
+
+      await expect(stream).toEmitApolloQueryResult({
+        data: dataOne,
+        loading: true,
+        networkStatus: NetworkStatus.loading,
+        partial: true,
+      });
+      expect(observable.getCurrentResult()).toEqualApolloQueryResult({
+        data: dataOne,
+        loading: true,
+        networkStatus: NetworkStatus.loading,
+        partial: true,
+      });
+
+      await expect(stream).toEmitApolloQueryResult({
+        data: superDataOne,
+        loading: false,
+        networkStatus: NetworkStatus.ready,
+      });
+      expect(observable.getCurrentResult()).toEqualApolloQueryResult({
+        data: superDataOne,
+        loading: false,
+        networkStatus: NetworkStatus.ready,
+      });
+
+      await expect(stream).not.toEmitAnything();
     });
 
-    itAsync(
-      "returns loading even if full data is available when using network-only fetchPolicy",
-      (resolve, reject) => {
-        const queryManager = mockQueryManager(
+    it("returns loading even if full data is available when using network-only fetchPolicy", async () => {
+      const client = new ApolloClient({
+        cache: new InMemoryCache({ addTypename: false }),
+        link: new MockLink([
           {
             request: { query, variables },
             result: { data: dataOne },
@@ -2112,52 +2455,53 @@ describe("ObservableQuery", () => {
           {
             request: { query, variables },
             result: { data: dataTwo },
-          }
-        );
+          },
+        ]),
+      });
 
-        queryManager.query({ query, variables }).then((result) => {
-          expect(result).toEqual({
-            data: dataOne,
-            loading: false,
-            networkStatus: NetworkStatus.ready,
-          });
+      const result = await client.query({ query, variables });
 
-          const observable = queryManager.watchQuery({
-            query,
-            variables,
-            fetchPolicy: "network-only",
-          });
+      expect(result).toEqualApolloQueryResult({
+        data: dataOne,
+        loading: false,
+        networkStatus: NetworkStatus.ready,
+      });
 
-          expect(observable.getCurrentResult()).toEqual({
-            data: undefined,
-            loading: true,
-            networkStatus: NetworkStatus.loading,
-          });
+      const observable = client.watchQuery({
+        query,
+        variables,
+        fetchPolicy: "network-only",
+      });
 
-          subscribeAndCount(reject, observable, (handleCount, subResult) => {
-            if (handleCount === 1) {
-              expect(subResult).toEqual({
-                loading: true,
-                data: undefined,
-                networkStatus: NetworkStatus.loading,
-              });
-            } else if (handleCount === 2) {
-              expect(subResult).toEqual({
-                data: dataTwo,
-                loading: false,
-                networkStatus: NetworkStatus.ready,
-              });
-              resolve();
-            }
-          });
-        });
-      }
-    );
+      // TODO: Fix this issue
+      // @ts-expect-error `ApolloQueryResult` expects a `data` property
+      expect(observable.getCurrentResult()).toEqualApolloQueryResult({
+        loading: true,
+        networkStatus: NetworkStatus.loading,
+      });
 
-    itAsync(
-      "returns loading on no-cache fetchPolicy queries when calling getCurrentResult",
-      (resolve, reject) => {
-        const queryManager = mockQueryManager(
+      const stream = new ObservableStream(observable);
+
+      // TODO: Fix this issue
+      // @ts-expect-error `ApolloQueryResult` expects a `data` property
+      await expect(stream).toEmitApolloQueryResult({
+        loading: true,
+        networkStatus: NetworkStatus.loading,
+      });
+
+      await expect(stream).toEmitApolloQueryResult({
+        data: dataTwo,
+        loading: false,
+        networkStatus: NetworkStatus.ready,
+      });
+
+      await expect(stream).not.toEmitAnything();
+    });
+
+    it("returns loading on no-cache fetchPolicy queries when calling getCurrentResult", async () => {
+      const client = new ApolloClient({
+        cache: new InMemoryCache({ addTypename: false }),
+        link: new MockLink([
           {
             request: { query, variables },
             result: { data: dataOne },
@@ -2165,40 +2509,184 @@ describe("ObservableQuery", () => {
           {
             request: { query, variables },
             result: { data: dataTwo },
-          }
-        );
+          },
+        ]),
+      });
 
-        queryManager.query({ query, variables }).then(() => {
-          const observable = queryManager.watchQuery({
-            query,
-            variables,
-            fetchPolicy: "no-cache",
-          });
-          expect(observable.getCurrentResult()).toEqual({
-            data: undefined,
-            loading: true,
-            networkStatus: 1,
-          });
+      await client.query({ query, variables });
 
-          subscribeAndCount(reject, observable, (handleCount, subResult) => {
-            const { data, loading, networkStatus } = observable.getCurrentResult();
+      const observable = client.watchQuery({
+        query,
+        variables,
+        fetchPolicy: "no-cache",
+      });
 
-            if (handleCount === 1) {
-              expect(subResult).toEqual({
-                data,
-                loading,
-                networkStatus,
-              });
-            } else if (handleCount === 2) {
-              expect(subResult).toEqual({
-                data: dataTwo,
-                loading: false,
-                networkStatus: 7,
-              });
-              resolve();
+      // TODO: Fix this issue
+      // @ts-expect-error `ApolloQueryResult` expects a `data` property
+      expect(observable.getCurrentResult()).toEqualApolloQueryResult({
+        loading: true,
+        networkStatus: NetworkStatus.loading,
+      });
+
+      const stream = new ObservableStream(observable);
+
+      // TODO: Fix this issue
+      // @ts-expect-error `ApolloQueryResult` expects a `data` property
+      await expect(stream).toEmitApolloQueryResult({
+        loading: true,
+        networkStatus: NetworkStatus.loading,
+      });
+      // TODO: Fix this issue
+      // @ts-expect-error `ApolloQueryResult` expects a `data` property
+      expect(observable.getCurrentResult()).toEqualApolloQueryResult({
+        loading: true,
+        networkStatus: NetworkStatus.loading,
+      });
+
+      await expect(stream).toEmitApolloQueryResult({
+        data: dataTwo,
+        loading: false,
+        networkStatus: NetworkStatus.ready,
+      });
+      expect(observable.getCurrentResult()).toEqualApolloQueryResult({
+        data: dataTwo,
+        loading: false,
+        networkStatus: NetworkStatus.ready,
+      });
+
+      await expect(stream).not.toEmitAnything();
+    });
+
+    it("handles multiple calls to getCurrentResult without losing data", async () => {
+      const query = gql`
+        {
+          greeting {
+            message
+            ... on Greeting @defer {
+              recipient {
+                name
+              }
             }
-          });
-        });
+          }
+        }
+      `;
+
+      const link = new MockSubscriptionLink();
+
+      const client = new ApolloClient({
+        link,
+        cache: new InMemoryCache(),
+      });
+
+      const obs = client.watchQuery({ query });
+      const stream = new ObservableStream(obs);
+
+      link.simulateResult({
+        result: {
+          data: {
+            greeting: {
+              message: "Hello world",
+              __typename: "Greeting",
+            },
+          },
+          hasNext: true,
+        },
+      });
+
+      await expect(stream).toEmitApolloQueryResult({
+        data: {
+          greeting: {
+            message: "Hello world",
+            __typename: "Greeting",
+          },
+        },
+        loading: false,
+        networkStatus: NetworkStatus.ready,
+      });
+
+      expect(obs.getCurrentResult()).toEqualApolloQueryResult({
+        data: {
+          greeting: {
+            message: "Hello world",
+            __typename: "Greeting",
+          },
+        },
+        loading: false,
+        networkStatus: NetworkStatus.ready,
+        // TODO: This should not be there since the observable did not emit this
+        // property.
+        partial: true,
+      });
+
+      link.simulateResult(
+        {
+          result: {
+            incremental: [
+              {
+                data: {
+                  recipient: {
+                    name: "Alice",
+                    __typename: "Person",
+                  },
+                  __typename: "Greeting",
+                },
+                path: ["greeting"],
+              },
+            ],
+            hasNext: false,
+          },
+        },
+        true
+      );
+
+      await expect(stream).toEmitApolloQueryResult({
+        data: {
+          greeting: {
+            message: "Hello world",
+            recipient: {
+              name: "Alice",
+              __typename: "Person",
+            },
+            __typename: "Greeting",
+          },
+        },
+        loading: false,
+        networkStatus: NetworkStatus.ready,
+      });
+
+      expect(obs.getCurrentResult()).toEqualApolloQueryResult({
+        data: {
+          greeting: {
+            message: "Hello world",
+            recipient: {
+              name: "Alice",
+              __typename: "Person",
+            },
+            __typename: "Greeting",
+          },
+        },
+        loading: false,
+        networkStatus: NetworkStatus.ready,
+      });
+
+      // This 2nd identical check is intentional to ensure calling this function
+      // more than once returns the right value.
+      expect(obs.getCurrentResult()).toEqualApolloQueryResult({
+        data: {
+          greeting: {
+            message: "Hello world",
+            recipient: {
+              name: "Alice",
+              __typename: "Person",
+            },
+            __typename: "Greeting",
+          },
+        },
+        loading: false,
+        networkStatus: NetworkStatus.ready,
+      });
+
+      await expect(stream).not.toEmitAnything();
     });
 
     {
@@ -2231,23 +2719,23 @@ describe("ObservableQuery", () => {
 
       type TestDetails = {
         // writeCache: cacheValues.initial
-        resultBeforeSubscribe: Result,
+        resultBeforeSubscribe: Result;
         // observableQuery.subscribe
-        resultAfterSubscribe: Result,
+        resultAfterSubscribe: Result;
         // writeCache:  cacheValues.update1
-        resultAfterCacheUpdate1: Result,
+        resultAfterCacheUpdate1: Result;
         // incoming result: cacheValues.link
-        resultAfterLinkNext: Result,
+        resultAfterLinkNext: Result;
         // writeCache:  cacheValues.update2
-        resultAfterCacheUpdate2: Result,
+        resultAfterCacheUpdate2: Result;
         // observableQuery.refetch
         // writeCache:  cacheValues.update3
-        resultAfterCacheUpdate3: Result,
+        resultAfterCacheUpdate3: Result;
         // incoming result:  cacheValues.refetch
-        resultAfterRefetchNext: Result,
+        resultAfterRefetchNext: Result;
         // writeCache:  cacheValues.update4
-        resultAfterCacheUpdate4: Result
-      }
+        resultAfterCacheUpdate4: Result;
+      };
 
       const cacheAndLink: TestDetails = {
         resultBeforeSubscribe: {
@@ -2389,7 +2877,7 @@ describe("ObservableQuery", () => {
         [
           initialFetchPolicy: WatchQueryFetchPolicy,
           nextFetchPolicy: WatchQueryFetchPolicy,
-          testDetails: TestDetails
+          testDetails: TestDetails,
         ]
       >([
         ["cache-and-network", "cache-and-network", cacheAndLink],
@@ -2401,7 +2889,6 @@ describe("ObservableQuery", () => {
         ["standby", "cache-and-network", standbyOnly],
         ["cache-only", "cache-only", cacheOnlyThenCacheAndLink],
         ["cache-only", "cache-and-network", cacheOnlyThenCacheAndLink],
-        
       ])(
         "fetchPolicy %s -> %s",
         async (
@@ -2432,8 +2919,8 @@ describe("ObservableQuery", () => {
           const cache = new InMemoryCache({});
           cache.writeQuery({ query, data: cacheValues.initial });
 
-          const queryManager = new QueryManager({ link, cache });
-          const observableQuery = queryManager.watchQuery({
+          const client = new ApolloClient({ link, cache });
+          const observableQuery = client.watchQuery({
             query,
             fetchPolicy,
             nextFetchPolicy,
@@ -2470,7 +2957,7 @@ describe("ObservableQuery", () => {
             resultAfterCacheUpdate2
           );
 
-          observableQuery.refetch();
+          void observableQuery.refetch();
 
           cache.writeQuery({ query, data: cacheValues.update3 });
           expect(observableQuery.getCurrentResult()).toStrictEqual(
@@ -2520,55 +3007,82 @@ describe("ObservableQuery", () => {
         },
       };
 
-      itAsync("returns optimistic mutation results from the store", (resolve, reject) => {
-        const queryManager = mockQueryManager(
-          {
-            request: { query, variables },
-            result: { data: dataOne },
-          },
-          {
-            request: { query: mutation },
-            result: { data: mutationData },
-          }
-        );
+      it("returns optimistic mutation results from the store", async () => {
+        const client = new ApolloClient({
+          cache: new InMemoryCache({ addTypename: false }),
+          link: new MockLink([
+            {
+              request: { query, variables },
+              result: { data: dataOne },
+            },
+            {
+              request: { query: mutation },
+              result: { data: mutationData },
+            },
+          ]),
+        });
 
-        const observable = queryManager.watchQuery({
+        const observable = client.watchQuery({
           query,
           variables,
         });
 
-        subscribeAndCount(reject, observable, (count, result) => {
-          const { data, loading, networkStatus } = observable.getCurrentResult();
-          expect(result).toEqual({
-            data,
-            loading,
-            networkStatus,
-          });
+        const stream = new ObservableStream(observable);
 
-          if (count === 1) {
-            expect(result).toEqual({
-              data: dataOne,
-              loading: false,
-              networkStatus: 7,
-            });
-            queryManager.mutate({
-              mutation,
-              optimisticResponse,
-              updateQueries,
-            });
-          } else if (count === 2) {
-            expect(result.data.people_one).toEqual(optimisticResponse);
-          } else if (count === 3) {
-            expect(result.data.people_one).toEqual(mutationData);
-            resolve();
-          }
+        await expect(stream).toEmitApolloQueryResult({
+          data: dataOne,
+          loading: false,
+          networkStatus: NetworkStatus.ready,
         });
+        expect(observable.getCurrentResult()).toEqualApolloQueryResult({
+          data: dataOne,
+          loading: false,
+          networkStatus: NetworkStatus.ready,
+        });
+
+        void client.mutate({
+          mutation,
+          optimisticResponse,
+          updateQueries,
+        });
+
+        await expect(stream).toEmitApolloQueryResult({
+          data: {
+            people_one: optimisticResponse,
+          },
+          loading: false,
+          networkStatus: NetworkStatus.ready,
+        });
+        expect(observable.getCurrentResult()).toEqualApolloQueryResult({
+          data: {
+            people_one: optimisticResponse,
+          },
+          loading: false,
+          networkStatus: NetworkStatus.ready,
+        });
+
+        await expect(stream).toEmitApolloQueryResult({
+          data: {
+            people_one: mutationData,
+          },
+          loading: false,
+          networkStatus: NetworkStatus.ready,
+        });
+        expect(observable.getCurrentResult()).toEqualApolloQueryResult({
+          data: {
+            people_one: mutationData,
+          },
+          loading: false,
+          networkStatus: NetworkStatus.ready,
+        });
+
+        await expect(stream).not.toEmitAnything();
       });
     });
   });
 
   describe("assumeImmutableResults", () => {
-    itAsync("should prevent costly (but safe) cloneDeep calls", async (resolve) => {
+    it("should prevent costly (but safe) cloneDeep calls", async () => {
       const queryOptions = {
         query: gql`
           query {
@@ -2578,14 +3092,17 @@ describe("ObservableQuery", () => {
         pollInterval: 20,
       };
 
-      function check({ assumeImmutableResults = true, assertFrozenResults = false }) {
+      function check({
+        assumeImmutableResults = true,
+        assertFrozenResults = false,
+      }) {
         const cache = new InMemoryCache();
         const client = new ApolloClient({
-          link: mockSingleLink(
+          link: new MockLink([
             { request: queryOptions, result: { data: { value: 1 } } },
             { request: queryOptions, result: { data: { value: 2 } } },
-            { request: queryOptions, result: { data: { value: 3 } } }
-          ).setOnError((error) => {
+            { request: queryOptions, result: { data: { value: 3 } } },
+          ]).setOnError((error) => {
             throw error;
           }),
           assumeImmutableResults,
@@ -2638,62 +3155,77 @@ describe("ObservableQuery", () => {
           throw new Error("not reached");
         } catch (error) {
           expect(error).toBeInstanceOf(TypeError);
-          expect(error.message).toMatch(/Cannot assign to read only property 'value'/);
+          expect((error as Error).message).toMatch(
+            /Cannot assign to read only property 'value'/
+          );
         }
       }
       await checkThrows(true);
       await checkThrows(false);
-
-      resolve();
     });
   });
 
+  // TODO: Determine if this API is useful. This clears out internal state not
+  // accessible to the end user.
   describe("resetQueryStoreErrors", () => {
-    itAsync("should remove any GraphQLError's stored in the query store", (resolve) => {
+    it("should remove any GraphQLError's stored in the query store", async () => {
       const graphQLError = new GraphQLError("oh no!");
 
-      const observable: ObservableQuery<any> = mockWatchQuery({
-        request: { query, variables },
-        result: { errors: [graphQLError] },
+      const client = new ApolloClient({
+        cache: new InMemoryCache({ addTypename: false }),
+        link: new MockLink([
+          {
+            request: { query, variables },
+            result: { errors: [graphQLError] },
+          },
+        ]),
       });
+      const observable = client.watchQuery({ query, variables });
 
-      observable.subscribe({
-        error() {
-          const { queryManager } = observable as any;
-          const queryInfo = queryManager["queries"].get(observable.queryId);
-          expect(queryInfo.graphQLErrors).toEqual([graphQLError]);
+      await new Promise<void>((resolve) => {
+        observable.subscribe({
+          error() {
+            const { queryManager } = observable as any;
+            const queryInfo = queryManager["queries"].get(observable.queryId);
+            expect(queryInfo.graphQLErrors).toEqual([graphQLError]);
 
-          observable.resetQueryStoreErrors();
-          expect(queryInfo.graphQLErrors).toEqual([]);
+            observable.resetQueryStoreErrors();
+            expect(queryInfo.graphQLErrors).toEqual([]);
 
-          resolve();
-        },
+            resolve();
+          },
+        });
       });
     });
 
-    itAsync("should remove network error's stored in the query store", (resolve) => {
+    it("should remove network error's stored in the query store", async () => {
       const networkError = new Error("oh no!");
 
-      const observable: ObservableQuery<any> = mockWatchQuery({
-        request: { query, variables },
-        result: { data: dataOne },
+      const client = new ApolloClient({
+        cache: new InMemoryCache({ addTypename: false }),
+        link: new MockLink([
+          {
+            request: { query, variables },
+            result: { data: dataOne },
+          },
+        ]),
       });
+      const observable = client.watchQuery({ query, variables });
 
-      observable.subscribe({
-        next() {
-          const { queryManager } = observable as any;
-          const queryInfo = queryManager["queries"].get(observable.queryId);
-          queryInfo.networkError = networkError;
-          observable.resetQueryStoreErrors();
-          expect(queryInfo.networkError).toBeUndefined();
-          resolve();
-        },
-      });
+      const stream = new ObservableStream(observable);
+
+      await stream.takeNext();
+
+      const { queryManager } = observable as any;
+      const queryInfo = queryManager["queries"].get(observable.queryId);
+      queryInfo.networkError = networkError;
+      observable.resetQueryStoreErrors();
+      expect(queryInfo.networkError).toBeUndefined();
     });
   });
 
-  describe('.query computed property', () => {
-    it('is equal to transformed query when instantiating via `watchQuery`', () => {
+  describe(".query computed property", () => {
+    it("is equal to transformed query when instantiating via `watchQuery`", () => {
       const query = gql`
         query {
           currentUser {
@@ -2719,7 +3251,7 @@ describe("ObservableQuery", () => {
       `);
     });
 
-    it('is referentially stable', () => {
+    it("is referentially stable", () => {
       const query = gql`
         query {
           currentUser {
@@ -2739,7 +3271,7 @@ describe("ObservableQuery", () => {
       expect(observable.query).toBe(result);
     });
 
-    it('is updated with transformed query when `setOptions` changes the query', () => {
+    it("is updated with transformed query when `setOptions` changes the query", async () => {
       const query = gql`
         query {
           currentUser {
@@ -2754,7 +3286,7 @@ describe("ObservableQuery", () => {
             id
           }
         }
-      `
+      `;
 
       const client = new ApolloClient({
         link: ApolloLink.empty(),
@@ -2772,7 +3304,7 @@ describe("ObservableQuery", () => {
         }
       `);
 
-      observable.setOptions({ query: updatedQuery });
+      await observable.setOptions({ query: updatedQuery });
 
       expect(observable.query).toMatchDocument(gql`
         query {
@@ -2784,7 +3316,7 @@ describe("ObservableQuery", () => {
       `);
     });
 
-    it('reflects query run through custom transforms', () => {
+    it("reflects query run through custom transforms", () => {
       const query = gql`
         query {
           currentUser {
@@ -2795,7 +3327,7 @@ describe("ObservableQuery", () => {
       `;
 
       const documentTransform = new DocumentTransform((document) => {
-        return removeDirectivesFromDocument([{ name: 'client' }], document)!
+        return removeDirectivesFromDocument([{ name: "client" }], document)!;
       });
 
       const client = new ApolloClient({
@@ -2818,13 +3350,18 @@ describe("ObservableQuery", () => {
     });
   });
 
-  itAsync("QueryInfo does not notify for !== but deep-equal results", (resolve, reject) => {
-    const queryManager = mockQueryManager({
-      request: { query, variables },
-      result: { data: dataOne },
+  it("QueryInfo does not notify for !== but deep-equal results", async () => {
+    const client = new ApolloClient({
+      cache: new InMemoryCache({ addTypename: false }),
+      link: new MockLink([
+        {
+          request: { query, variables },
+          result: { data: dataOne },
+        },
+      ]),
     });
 
-    const observable = queryManager.watchQuery({
+    const observable = client.watchQuery({
       query,
       variables,
       // If we let the cache return canonical results, it will be harder to
@@ -2839,70 +3376,72 @@ describe("ObservableQuery", () => {
     const setDiffSpy = jest.spyOn(queryInfo, "setDiff");
     const notifySpy = jest.spyOn(queryInfo, "notify");
 
-    subscribeAndCount(reject, observable, (count, result) => {
-      if (count === 1) {
-        expect(result).toEqual({
-          loading: false,
-          networkStatus: NetworkStatus.ready,
-          data: dataOne,
-        });
+    const stream = new ObservableStream(observable);
 
-        let invalidateCount = 0;
-        let onWatchUpdatedCount = 0;
-
-        cache.batch({
-          optimistic: true,
-          update(cache) {
-            cache.modify({
-              fields: {
-                people_one(value, { INVALIDATE }) {
-                  expect(value).toEqual(dataOne.people_one);
-                  ++invalidateCount;
-                  return INVALIDATE;
-                },
-              },
-            });
-          },
-          // Verify that the cache.modify operation did trigger a cache broadcast.
-          onWatchUpdated(watch, diff) {
-            expect(watch.watcher).toBe(queryInfo);
-            expect(diff).toEqual({
-              complete: true,
-              result: {
-                people_one: {
-                  name: "Luke Skywalker",
-                },
-              },
-            });
-            ++onWatchUpdatedCount;
-          },
-        });
-
-        new Promise((resolve) => setTimeout(resolve, 100))
-          .then(() => {
-            expect(setDiffSpy).toHaveBeenCalledTimes(1);
-            expect(notifySpy).not.toHaveBeenCalled();
-            expect(invalidateCount).toBe(1);
-            expect(onWatchUpdatedCount).toBe(1);
-            queryManager.stop();
-          })
-          .then(resolve, reject);
-      } else {
-        reject("too many results");
-      }
+    await expect(stream).toEmitApolloQueryResult({
+      data: dataOne,
+      loading: false,
+      networkStatus: NetworkStatus.ready,
     });
+
+    let invalidateCount = 0;
+    let onWatchUpdatedCount = 0;
+
+    cache.batch({
+      optimistic: true,
+      update(cache) {
+        cache.modify({
+          fields: {
+            people_one(value, { INVALIDATE }) {
+              expect(value).toEqual(dataOne.people_one);
+              ++invalidateCount;
+              return INVALIDATE;
+            },
+          },
+        });
+      },
+      // Verify that the cache.modify operation did trigger a cache broadcast.
+      onWatchUpdated(watch, diff) {
+        expect(watch.watcher).toBe(queryInfo);
+        expect(diff).toEqual({
+          complete: true,
+          result: {
+            people_one: {
+              name: "Luke Skywalker",
+            },
+          },
+        });
+        ++onWatchUpdatedCount;
+      },
+    });
+
+    await wait(100);
+
+    expect(setDiffSpy).toHaveBeenCalledTimes(1);
+    expect(notifySpy).not.toHaveBeenCalled();
+    expect(invalidateCount).toBe(1);
+    expect(onWatchUpdatedCount).toBe(1);
+    client.stop();
+
+    await expect(stream).not.toEmitAnything();
   });
 
-  itAsync("ObservableQuery#map respects Symbol.species", (resolve, reject) => {
-    const observable = mockWatchQuery({
-      request: { query, variables },
-      result: { data: dataOne },
+  it("ObservableQuery#map respects Symbol.species", async () => {
+    const client = new ApolloClient({
+      cache: new InMemoryCache({ addTypename: false }),
+      link: new MockLink([
+        {
+          request: { query, variables },
+          result: { data: dataOne },
+        },
+      ]),
     });
+    const observable = client.watchQuery({ query, variables });
     expect(observable).toBeInstanceOf(Observable);
     expect(observable).toBeInstanceOf(ObservableQuery);
 
     const mapped = observable.map((result) => {
-      expect(result).toEqual({
+      expect(result).toEqualApolloQueryResult({
         loading: false,
         networkStatus: NetworkStatus.ready,
         data: dataOne,
@@ -2915,23 +3454,15 @@ describe("ObservableQuery", () => {
     expect(mapped).toBeInstanceOf(Observable);
     expect(mapped).not.toBeInstanceOf(ObservableQuery);
 
-    const sub = mapped.subscribe({
-      next(result) {
-        sub.unsubscribe();
-        try {
-          expect(result).toEqual({
-            loading: false,
-            networkStatus: NetworkStatus.ready,
-            data: { mapped: true },
-          });
-        } catch (error) {
-          reject(error);
-          return;
-        }
-        resolve();
-      },
-      error: reject,
+    const stream = new ObservableStream(mapped);
+
+    await expect(stream).toEmitApolloQueryResult({
+      loading: false,
+      networkStatus: NetworkStatus.ready,
+      data: { mapped: true },
     });
+
+    await expect(stream).not.toEmitAnything();
   });
 });
 
@@ -3061,7 +3592,9 @@ test("regression test for #10587", async () => {
     ],
   } as const;
 
-  await waitFor(() => expect(query1Spy.mock.calls).toEqual(finalExpectedCalls.query1.slice(0, 1)));
+  await waitFor(() =>
+    expect(query1Spy.mock.calls).toEqual(finalExpectedCalls.query1.slice(0, 1))
+  );
   expect(query2Spy.mock.calls).toEqual(finalExpectedCalls.query2.slice(0, 1));
 
   observers.query1.next({
@@ -3069,7 +3602,9 @@ test("regression test for #10587", async () => {
   });
   observers.query1.complete();
 
-  await waitFor(() => expect(query1Spy.mock.calls).toEqual(finalExpectedCalls.query1));
+  await waitFor(() =>
+    expect(query1Spy.mock.calls).toEqual(finalExpectedCalls.query1)
+  );
   expect(query2Spy.mock.calls).toEqual(finalExpectedCalls.query2.slice(0, 2));
 
   observers.query2.next({
@@ -3077,6 +3612,69 @@ test("regression test for #10587", async () => {
   });
   observers.query2.complete();
 
-  await waitFor(() => expect(query2Spy.mock.calls).toEqual(finalExpectedCalls.query2));
+  await waitFor(() =>
+    expect(query2Spy.mock.calls).toEqual(finalExpectedCalls.query2)
+  );
   expect(query1Spy.mock.calls).toEqual(finalExpectedCalls.query1);
+});
+
+// https://github.com/apollographql/apollo-client/issues/11184
+test("handles changing variables in rapid succession before other request is completed", async () => {
+  interface UserCountQuery {
+    userCount: number;
+  }
+  interface UserCountVariables {
+    department: "HR" | null;
+  }
+
+  const query: TypedDocumentNode<UserCountQuery, UserCountVariables> = gql`
+    query UserCountQuery($department: Department) {
+      userCount(department: $department)
+    }
+  `;
+  const mocks = [
+    {
+      request: { query, variables: { department: null } },
+      result: { data: { userCount: 10 } },
+    },
+    {
+      request: { query, variables: { department: "HR" } },
+      result: { data: { userCount: 5 } },
+      delay: 50,
+    },
+  ];
+
+  const client = new ApolloClient({
+    link: new MockLink(mocks),
+    cache: new InMemoryCache(),
+  });
+
+  const observable = client.watchQuery<UserCountQuery, UserCountVariables>({
+    query,
+    variables: { department: null },
+  });
+
+  observable.subscribe(jest.fn());
+
+  await waitFor(() => {
+    expect(observable.getCurrentResult(false)).toEqual({
+      data: { userCount: 10 },
+      loading: false,
+      networkStatus: NetworkStatus.ready,
+    });
+  });
+
+  void observable.reobserve({ variables: { department: "HR" } });
+  await wait(10);
+  void observable.reobserve({ variables: { department: null } });
+
+  // Wait for request to finish
+  await wait(50);
+
+  expect(observable.options.variables).toEqual({ department: null });
+  expect(observable.getCurrentResult(false)).toEqual({
+    data: { userCount: 10 },
+    loading: false,
+    networkStatus: NetworkStatus.ready,
+  });
 });

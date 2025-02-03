@@ -14,12 +14,14 @@ export type {
   SubscriptionOptions,
   FetchPolicy,
   WatchQueryFetchPolicy,
+  MutationFetchPolicy,
+  RefetchWritePolicy,
   ErrorPolicy,
   FetchMoreQueryOptions,
   SubscribeToMoreOptions,
 } from "./watchQueryOptions.js";
 export { NetworkStatus, isNetworkRequestSettled } from "./networkStatus.js";
-export * from "./types.js";
+export type * from "./types.js";
 export type { Resolver, FragmentMatcher } from "./LocalState.js";
 export { isApolloError, ApolloError } from "../errors/index.js";
 /* Cache */
@@ -38,6 +40,8 @@ export type {
   FieldMergeFunction,
   FieldFunctionOptions,
   PossibleTypesMap,
+  WatchFragmentOptions,
+  WatchFragmentResult,
 } from "../cache/index.js";
 export {
   Cache,
@@ -48,7 +52,7 @@ export {
   makeVar,
 } from "../cache/index.js";
 
-export * from "../cache/inmemory/types.js";
+export type * from "../cache/inmemory/types.js";
 
 /* Link */
 
@@ -61,6 +65,16 @@ export {
   fromPromise,
   throwServerError,
 } from "../link/utils/index.js";
+
+/* Masking */
+export type {
+  DataMasking,
+  FragmentType,
+  Masked,
+  MaskedDocumentNode,
+  MaybeMasked,
+  Unmasked,
+} from "../masking/index.js";
 
 /* Utilities */
 

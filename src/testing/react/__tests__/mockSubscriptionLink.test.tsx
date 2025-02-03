@@ -1,17 +1,15 @@
-import React from 'react';
-import { render, waitFor } from '@testing-library/react';
-import gql from 'graphql-tag';
+import React from "react";
+import { render, waitFor } from "@testing-library/react";
+import gql from "graphql-tag";
 
-import { MockSubscriptionLink } from '../../core';
-import { ApolloClient } from '../../../core';
-import { InMemoryCache as Cache } from '../../../cache';
-import { ApolloProvider } from '../../../react/context';
-import { useSubscription } from '../../../react/hooks';
+import { MockSubscriptionLink } from "../../core";
+import { ApolloClient } from "../../../core";
+import { InMemoryCache as Cache } from "../../../cache";
+import { ApolloProvider } from "../../../react/context";
+import { useSubscription } from "../../../react/hooks";
 
-const IS_REACT_18 = React.version.startsWith('18');
-
-describe('mockSubscriptionLink', () => {
-  it('should work with multiple subscribers to the same mock websocket', async () => {
+describe("mockSubscriptionLink", () => {
+  it("should work with multiple subscribers to the same mock websocket", async () => {
     const subscription = gql`
       subscription {
         car {
@@ -23,7 +21,7 @@ describe('mockSubscriptionLink', () => {
     const link = new MockSubscriptionLink();
     const client = new ApolloClient({
       link,
-      cache: new Cache({ addTypename: false })
+      cache: new Cache({ addTypename: false }),
     });
 
     let renderCountA = 0;
@@ -40,8 +38,8 @@ describe('mockSubscriptionLink', () => {
       return null;
     };
 
-    const results = ['Audi', 'BMW', 'Mercedes', 'Hyundai'].map(make => ({
-      result: { data: { car: { make } } }
+    const results = ["Audi", "BMW", "Mercedes", "Hyundai"].map((make) => ({
+      result: { data: { car: { make } } },
     }));
 
     const Component = () => {
@@ -64,12 +62,15 @@ describe('mockSubscriptionLink', () => {
       </ApolloProvider>
     );
 
-    const numRenders = IS_REACT_18 ? 2 : results.length + 1;
+    const numRenders = results.length + 1;
 
     // automatic batching in React 18 means we only see 2 renders vs. 5 in v17
-    await waitFor(() => {
-      expect(renderCountA).toBe(numRenders);
-    }, { timeout: 1000 });
+    await waitFor(
+      () => {
+        expect(renderCountA).toBe(numRenders);
+      },
+      { timeout: 1000 }
+    );
     expect(renderCountB).toBe(numRenders);
   });
 });

@@ -5,8 +5,16 @@ import type { ErrorCodes } from "../../invariantErrorCodes.js";
 import { stringifyForDisplay } from "../common/stringifyForDisplay.js";
 
 function wrap(fn: (msg?: string, ...args: any[]) => void) {
-  return function (message: string | number, ...args: any[]) {
-    fn(typeof message === "number" ? getErrorMsg(message) : message, ...args);
+  return function (message?: string | number, ...args: any[]) {
+    if (typeof message === "number") {
+      const arg0 = message;
+      message = getHandledErrorMsg(arg0);
+      if (!message) {
+        message = getFallbackErrorMsg(arg0, args);
+        args = [];
+      }
+    }
+    fn(...[message].concat(args));
   };
 }
 
@@ -63,7 +71,10 @@ const invariant: WrappedInvariant = Object.assign(
     ...args: unknown[]
   ): asserts condition {
     if (!condition) {
-      originalInvariant(condition, getErrorMsg(message, args));
+      originalInvariant(
+        condition,
+        getHandledErrorMsg(message, args) || getFallbackErrorMsg(message, args)
+      );
     }
   },
   {
@@ -88,7 +99,10 @@ function newInvariantError(
   message?: string | number,
   ...optionalParams: unknown[]
 ) {
-  return new InvariantError(getErrorMsg(message, optionalParams));
+  return new InvariantError(
+    getHandledErrorMsg(message, optionalParams) ||
+      getFallbackErrorMsg(message, optionalParams)
+  );
 }
 
 const ApolloErrorMessageHandler = Symbol.for(
@@ -97,27 +111,46 @@ const ApolloErrorMessageHandler = Symbol.for(
 declare global {
   interface Window {
     [ApolloErrorMessageHandler]?: {
-      (message: string | number, args: unknown[]): string | undefined;
+      (message: string | number, args: string[]): string | undefined;
     } & ErrorCodes;
   }
 }
 
-function getErrorMsg(message?: string | number, messageArgs: unknown[] = []) {
+function stringify(arg: any) {
+  if (typeof arg == "string") {
+    return arg;
+  }
+
+  try {
+    return stringifyForDisplay(arg, 2).slice(0, 1000);
+  } catch {
+    return "<non-serializable>";
+  }
+}
+
+function getHandledErrorMsg(
+  message?: string | number,
+  messageArgs: unknown[] = []
+) {
   if (!message) return;
-  const args = messageArgs.map((arg) =>
-    typeof arg == "string" ? arg : stringifyForDisplay(arg, 2).slice(0, 1000)
-  );
   return (
-    (global[ApolloErrorMessageHandler] &&
-      global[ApolloErrorMessageHandler](message, args)) ||
-    `An error occured! For more details, see the full error text at https://go.apollo.dev/c/err#${encodeURIComponent(
-      JSON.stringify({
-        version,
-        message,
-        args,
-      })
-    )}`
+    global[ApolloErrorMessageHandler] &&
+    global[ApolloErrorMessageHandler](message, messageArgs.map(stringify))
   );
+}
+
+function getFallbackErrorMsg(
+  message?: string | number,
+  messageArgs: unknown[] = []
+) {
+  if (!message) return;
+  return `An error occurred! For more details, see the full error text at https://go.apollo.dev/c/err#${encodeURIComponent(
+    JSON.stringify({
+      version,
+      message,
+      args: messageArgs.map(stringify),
+    })
+  )}`;
 }
 
 export {

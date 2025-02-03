@@ -1,6 +1,6 @@
-# 🔮 Apollo Client Roadmap
+# 🔮 Apollo Client Ecosystem Roadmap
 
-**Last updated: 2023-08-09**
+**Last updated: 2025-01-22**
 
 For up to date release notes, refer to the project's [Changelog](https://github.com/apollographql/apollo-client/blob/main/CHANGELOG.md).
 
@@ -13,26 +13,47 @@ For up to date release notes, refer to the project's [Changelog](https://github.
 
 ---
 
-## [3.9.0](https://github.com/apollographql/apollo-client/milestone/32)
+## In progress
 
-_Currently in planning phase_
+### Apollo Client
 
-Features we plan to tackle:
+#### 3.13.0 - February 3, 2024
+_Release candidate - January 27th_
 
-- Introduce a suspenseful `useFragment` that will suspend when the data is not yet loaded
-- Ability to preload a query outside of a React component that can be used with `useReadQuery` to suspend while loading
-- Introduce a new `useInteractiveQuery`/`useLazyBackgroundQuery` hook (name TBD) 
-- Add metrics integration throughout the library for powerful insights
-- Improved testing utilities 
+- `useSuspenseFragment`
 
-> NOTE: These are subject to change and are not guaranteed to be part of 3.9 at the time of this writing.
+#### [4.0.0](https://github.com/apollographql/apollo-client/milestone/31) - TBD
+_Release candidate - TBD_
 
-## Future 3.x releases
+#### Upcoming features
 
-_Approximate Date: TBD_
+##### 3.x.x
+- Deprecations and preparations for 4.0
 
-The 3.8 release is a major milestone for the project's React support.  Feedback from the community will have a big impact on where we go next, particularly as use cases for React Server Components and other React 18 features emerge.  In addition to new functionality, there is a significant backlog of questions and fixes that we want to categorize and thoughtfully address in upcoming releases.
+### GraphQL Testing Library
 
-## 4.0
+- New documentation
+- Subscription support
 
-- `Release 4.0` will be our next major release of the Client and is still in early planning.  See Github [4.0 Milestone](https://github.com/apollographql/apollo-client/milestone/31) for more details.
+_These changes will take longer than anticipated due to prioritization on Apollo Client 4.0_
+
+### VSCode Extension
+
+_No outstanding work_
+
+### GraphQL Tag
+
+- `Release 3.0` will be our next major release of `graphql-tag` and is still in planning. See Github [3.0 Milestone](https://github.com/apollographql/graphql-tag/milestone/3) for more details.
+
+### Apollo Client DevTools
+
+- Memory panel
+
+_These changes will take longer than anticipated due to prioritization on Apollo Client 4.0_
+
+### Apollo Client React Framework Integrations
+
+- New/more robust documentation
+- Support for `@defer` with `PreloadQuery`
+- Support for Apollo Client Streaming in TanStack Router
+- Support for Apollo Client Streaming in React Router 7 (merged)

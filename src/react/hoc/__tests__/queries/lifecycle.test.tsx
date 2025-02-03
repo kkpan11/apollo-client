@@ -9,7 +9,11 @@ import { InMemoryCache as Cache } from "../../../../cache";
 import { mockSingleLink } from "../../../../testing";
 import { Query as QueryComponent } from "../../../components";
 import { graphql } from "../../graphql";
-import { ChildProps } from "../../types";
+import { ChildProps, DataValue } from "../../types";
+import {
+  disableActEnvironment,
+  createRenderStream,
+} from "@testing-library/react-render-stream";
 
 describe("[queries] lifecycle", () => {
   // lifecycle
@@ -50,62 +54,50 @@ describe("[queries] lifecycle", () => {
       }),
     })(
       class extends React.Component<ChildProps<Vars, Data, Vars>> {
-        componentDidUpdate(prevProps: ChildProps<Vars, Data, Vars>) {
-          try {
-            const { data } = this.props;
-            switch (++count) {
-              case 1:
-                expect(prevProps.data!.loading).toBe(true);
-                expect(prevProps.data!.allPeople).toBe(undefined);
-                expect(data!.loading).toBe(false);
-                expect(data!.variables).toEqual(variables1);
-                expect(data!.allPeople).toEqual(data1.allPeople);
-                break;
-              case 2:
-                expect(data!.loading).toBe(true);
-                expect(data!.variables).toEqual(variables2);
-                expect(data!.allPeople).toBe(undefined);
-                break;
-              case 3:
-                expect(data!.loading).toBe(false);
-                expect(data!.variables).toEqual(variables2);
-                expect(data!.allPeople).toEqual(data2.allPeople);
-                break;
-              default:
-                fail(`Too many renders (${count})`);
-            }
-          } catch (err) {
-            fail(err);
-          }
-        }
-
         render() {
+          replaceSnapshot(this.props.data!);
           return null;
         }
       }
     );
 
-    class ChangingProps extends React.Component<{}, { first: number }> {
-      state = { first: 1 };
+    using _disabledAct = disableActEnvironment();
+    const { takeRender, replaceSnapshot, render } =
+      createRenderStream<DataValue<Data, Vars>>();
+    const { rerender } = await render(<Container first={1} />, {
+      wrapper: ({ children }) => (
+        <ApolloProvider client={client}>{children}</ApolloProvider>
+      ),
+    });
 
-      componentDidMount() {
-        setTimeout(() => {
-          this.setState({ first: 2 });
-        }, 50);
-      }
-
-      render() {
-        return <Container first={this.state.first} />;
-      }
+    {
+      const { snapshot } = await takeRender();
+      expect(snapshot!.loading).toBe(true);
+      expect(snapshot!.allPeople).toBe(undefined);
     }
 
-    render(
-      <ApolloProvider client={client}>
-        <ChangingProps />
-      </ApolloProvider>
-    );
+    {
+      const { snapshot } = await takeRender();
+      expect(snapshot!.loading).toBe(false);
+      expect(snapshot!.variables).toEqual(variables1);
+      expect(snapshot!.allPeople).toEqual(data1.allPeople);
+    }
 
-    await waitFor(() => expect(count).toBe(3));
+    await rerender(<Container first={2} />);
+
+    {
+      const { snapshot } = await takeRender();
+      expect(snapshot!.loading).toBe(true);
+      expect(snapshot!.variables).toEqual(variables2);
+      expect(snapshot!.allPeople).toBe(undefined);
+    }
+
+    {
+      const { snapshot } = await takeRender();
+      expect(snapshot!.loading).toBe(false);
+      expect(snapshot!.variables).toEqual(variables2);
+      expect(snapshot!.allPeople).toEqual(data2.allPeople);
+    }
   });
 
   it("rebuilds the queries on prop change when using `options`", async () => {
@@ -405,7 +397,7 @@ describe("[queries] lifecycle", () => {
               expect(props.foo).toEqual(43);
               expect(props.data!.loading).toEqual(false);
               expect(props.data!.allPeople).toEqual(data1.allPeople);
-              props.data!.refetch();
+              void props.data!.refetch();
             } else if (count === 3) {
               expect(props.foo).toEqual(43);
               expect(props.data!.loading).toEqual(false);
@@ -767,7 +759,7 @@ describe("[queries] lifecycle", () => {
     const Container = graphql<Vars, Data>(query)(
       class extends React.Component<ChildProps<Vars, Data>> {
         componentDidMount() {
-          this.props.data!.refetch().then((result) => {
+          void this.props.data!.refetch().then((result) => {
             expect(result.data!.user.name).toBe("Luke Skywalker");
             done = true;
           });

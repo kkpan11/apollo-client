@@ -32,7 +32,7 @@ You should define a name for _every_ GraphQL operation in your application. Doin
 * You clarify the purpose of each operation for both yourself and your teammates.
 * You avoid unexpected errors when combining multiple operations in a single query document (an anonymous operation can only appear alone).
 * You improve debugging output in both client _and_ server code, helping you identify exactly which operation is causing issues.
-* [Apollo Studio](/studio/) provides helpful operation-level metrics, which require named operations.
+* [Apollo GraphOS Studio](/graphos/graphs/studio-features) provides helpful operation-level metrics, which require named operations.
 
 ## Use GraphQL variables to provide arguments
 
@@ -94,7 +94,7 @@ The server-side cache also powers features like [automatic persisted queries](/a
 
 The value of a GraphQL argument might include sensitive information, such as an access token or a user's personal info. If this information is included in a query string, it's cached with the rest of that query string.
 
-Variable values are _not_ included in query strings. You can also specify _which_ variable values (if any) are [included in metrics reporting](/apollo-server/api/plugin/usage-reporting/#sendvariablevalues) to Apollo Studio.
+Variable values are _not_ included in query strings. You can also specify _which_ variable values (if any) are [included in metrics reporting](/apollo-server/api/plugin/usage-reporting/#sendvariablevalues) to Studio.
 
 ## Query only the data you need, where you need it
 
@@ -160,87 +160,6 @@ query GetGlobalStatus {
 * If you have collections of components that _are_ always rendered together, you can use fragments to distribute the structure of a single query between them. See [Colocating fragments](./fragments/#colocating-fragments).
 * If you're querying a list field that returns more items than your component needs to render, you should [paginate that field](../pagination/overview/).
 
-
-
-## Use fragments to encapsulate related sets of fields
-
-[GraphQL fragments](./fragments/) are sets of fields you can share across multiple operations. Here's an example declaration:
-
-```graphql
-# Recommended ✅
-fragment NameParts on Person {
-  title
-  firstName
-  middleName
-  lastName
-}
-```
-
-It's likely that multiple queries in an app require a person's full name. This `NameParts` fragment helps keep those queries consistent, readable, and short:
-
-```graphql
-# Recommended ✅
-query GetAttendees($eventId: ID!) {
-  attendees(id: $eventId) {
-    id
-    rsvp
-    ...NameParts # Include all fields from the NameParts fragment
-  }
-}
-```
-
-### Avoid excessive or illogical fragments
-
-If you use _too many_ fragments, your queries might become _less_ readable:
-
-<ExpansionPanel title="Click to expand">
-
-```graphql
-# Use caution ⚠️
-query GetAttendees($eventId: ID!) {
-  attendees(id: $eventId) {
-    id
-    rsvp
-    ...NameParts
-    profile {
-      ...VisibilitySettings
-      events {
-        ...EventSummary
-      }
-      avatar {
-        ...ImageDetails
-      }
-    }
-  }
-}
-
-```
-
-</ExpansionPanel>
-
-Additionally, only define fragments for sets of fields that share a logical semantic relationship. _Don't_ create a fragment just because multiple queries happen to share certain fields:
-
-```graphql
-# Recommended ✅
-fragment NameParts on Person {
-  title
-  firstName
-  middleName
-  lastName
-}
-
-# Not recommended ❌
-fragment SharedFields on Country {
-  population
-  neighboringCountries {
-    capital
-    rivers {
-      name
-    }
-  }
-}
-```
-
 ## Query global data and user-specific data separately
 
 Some fields return the exact same data regardless of which user queries them:
@@ -274,7 +193,7 @@ To improve the performance of your [server-side response cache](/apollo-server/p
 
 ## Set your app's `name` and `version` for metrics reporting (paid)
 
-> This recommendation is _most_ pertinent to Apollo Studio organizations with a [paid plan](https://www.apollographql.com/pricing/), however it can be helpful for all apps.
+> This recommendation is _most_ pertinent to Studio organizations with a [paid plan](https://www.apollographql.com/pricing/), however it can be helpful for all apps.
 
 The constructor of `ApolloClient` accepts the `name` and `version` options:
 
@@ -289,4 +208,4 @@ const client = new ApolloClient({
 
 If you specify these values, Apollo Client automatically adds them to each operation request as HTTP headers (`apollographql-client-name` and `apollographql-client-version`).
 
-Then if you've configured [metrics reporting in Apollo Studio](/graphos/metrics/usage-reporting/), Apollo Server includes your app's `name` and `version` in the operation traces it reports to Studio. This enables you to [segment metrics by client](/graphos/metrics/client-awareness/).
+Then if you've configured metrics reporting in Studio, Apollo Server includes your app's `name` and `version` in the operation traces it reports to Studio. This enables you to [segment metrics by client](/graphos/metrics/client-awareness/).
